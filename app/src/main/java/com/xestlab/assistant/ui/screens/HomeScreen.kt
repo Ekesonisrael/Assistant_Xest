@@ -15,6 +15,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,13 +24,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -57,14 +55,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.xestlab.assistant.ai.PlannerProposal
 import com.xestlab.assistant.data.model.ConversationTurn
 import com.xestlab.assistant.data.model.Item
+import com.xestlab.assistant.data.model.UnreadEmailEntity
 import com.xestlab.assistant.ui.theme.BgDark
 import com.xestlab.assistant.ui.theme.BorderDark
 import com.xestlab.assistant.ui.theme.CardShape8
@@ -86,19 +92,22 @@ fun HomeScreen(viewModel: AssistantViewModel) {
     val context = LocalContext.current
     val prefs by viewModel.prefsState.collectAsState()
     val isSpeaking by viewModel.isSpeaking.collectAsState()
+    val isThinking by viewModel.isThinking.collectAsState()
+    val aiEnabled by viewModel.aiEnabledState.collectAsState()
+    val activeProvider by viewModel.activeProvider.collectAsState()
     val dailyPlanSummary by viewModel.dailyPlanSummary.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
     val checklistItems by viewModel.checklistItems.collectAsState()
     val todayLogs by viewModel.todayLogs.collectAsState()
     val activeProposal by viewModel.activeProposal.collectAsState()
     val conversationTurns by viewModel.conversationTurns.collectAsState()
+    val unreadEmails by viewModel.unreadEmails.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
     var isListening by remember { mutableStateOf(false) }
     var partialSpeech by remember { mutableStateOf("") }
     var voiceFeedbackError by remember { mutableStateOf<String?>(null) }
 
-    // Trigger session greeting + TextToSpeech daily plan readout when Home opens
     LaunchedEffect(prefs.userName, prefs.isFirstLaunchComplete) {
         if (prefs.isFirstLaunchComplete && prefs.userName.isNotBlank()) {
             viewModel.onHomeScreenDisplayed()
@@ -109,7 +118,6 @@ fun HomeScreen(viewModel: AssistantViewModel) {
         viewModel.handleUniversalInput(recognized, isSpoken = true)
     }
 
-    // Native Android SpeechRecognizer managed strictly on Main UI thread
     val speechRecognizer = remember(context) {
         if (SpeechRecognizer.isRecognitionAvailable(context)) {
             SpeechRecognizer.createSpeechRecognizer(context)
@@ -141,12 +149,12 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 isListening = false
                 partialSpeech = ""
                 voiceFeedbackError = when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that. Tap MIC to try again."
+                    SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that. Tap the microphone to try again."
                     SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech detected."
                     SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission is required."
                     SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
-                        "Speech network unavailable. Check offline speech pack or connection."
-                    else -> "Voice input stopped (code $error)."
+                        "Speech network unavailable. Check connection or offline speech pack."
+                    else -> "Voice capture stopped (code $error)."
                 }
             }
 
@@ -183,10 +191,9 @@ fun HomeScreen(viewModel: AssistantViewModel) {
     fun beginSpeechRecognition() {
         val recognizer = speechRecognizer
         if (recognizer == null) {
-            voiceFeedbackError = "Android SpeechRecognizer service is not available on this device."
+            voiceFeedbackError = "SpeechRecognizer service is not available on this device."
             return
         }
-        // Stop ongoing TTS before opening mic so assistant doesn't transcribe its own voice
         viewModel.stopSpeaking()
         partialSpeech = ""
         voiceFeedbackError = null
@@ -211,7 +218,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
         if (granted) {
             beginSpeechRecognition()
         } else {
-            voiceFeedbackError = "Microphone permission is required for SpeechRecognizer voice input."
+            voiceFeedbackError = "Microphone permission is required for voice input."
         }
     }
 
@@ -221,13 +228,16 @@ fun HomeScreen(viewModel: AssistantViewModel) {
         hour < 17 -> "Good afternoon"
         else -> "Good evening"
     }
-    val displayName = prefs.userName.ifBlank { "Friend" }
+    val displayName = prefs.userName.ifBlank { "King Israel" }
     val doneChecklistCount = remember(checklistItems, todayLogs) {
         val logMap = todayLogs.associateBy { it.itemId }
         checklistItems.count { logMap[it.id]?.isDone == true }
     }
     val nextUpItem = remember(pendingItems) {
         pendingItems.firstOrNull { !it.sourceText.startsWith("web_pipeline_") }
+    }
+    val actionableEmails = remember(unreadEmails) {
+        unreadEmails.filter { it.isActionable && !it.addedToTasks }.take(3)
     }
 
     Column(
@@ -240,29 +250,73 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 .weight(1f)
                 .fillMaxWidth(),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 1. Personalized DataStore Name Greeting Header + Daily Plan TextToSpeech Controls
+            // 1. Greeting Header
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = SimpleDateFormat("EEEE, d MMMM yyyy", Locale.getDefault()).format(Date()).uppercase(Locale.getDefault()),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = TealAccent
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = SimpleDateFormat("EEEE, d MMM yyyy", Locale.getDefault())
+                                .format(Date())
+                                .uppercase(Locale.getDefault()),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TealAccent
+                        )
+                        Text(
+                            text = if (aiEnabled) "BRAIN: ${activeProvider.name}" else "OFFLINE MODE",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (aiEnabled) TealAccent else TextMutedDark
+                        )
+                    }
                     Text(
                         text = "$greetingPrefix, $displayName",
                         style = MaterialTheme.typography.headlineLarge
                     )
                     Text(
-                        text = "Core checklist: $doneChecklistCount of ${checklistItems.size} completed today",
+                        text = "Daily targets: $doneChecklistCount of ${checklistItems.size} complete | Wake alarm: ${prefs.wakeUpTime}",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextMutedDark
                     )
                 }
             }
 
-            // 2. Daily Plan TextToSpeech Card
+            // 2. Centered Microphone Hero Section
+            item {
+                CenteredMicrophoneHero(
+                    isListening = isListening,
+                    isThinking = isThinking,
+                    isSpeaking = isSpeaking,
+                    partialTranscript = partialSpeech,
+                    errorMessage = voiceFeedbackError,
+                    onToggleListen = {
+                        if (isListening) {
+                            try {
+                                speechRecognizer?.stopListening()
+                            } catch (_: Exception) {
+                            }
+                            isListening = false
+                        } else {
+                            val hasPerm = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (hasPerm) {
+                                beginSpeechRecognition()
+                            } else {
+                                recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        }
+                    },
+                    onStopSpeech = { viewModel.stopSpeaking() }
+                )
+            }
+
+            // 3. Daily Plan Briefing Card
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -286,7 +340,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                             )
                             if (isSpeaking) {
                                 Text(
-                                    text = "SPEAKING VIA TTS",
+                                    text = "SPEAKING",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = TealAccent
                                 )
@@ -295,7 +349,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
 
                         Text(
                             text = dailyPlanSummary.ifBlank {
-                                "$greetingPrefix, $displayName. Tap 'Read Daily Plan' to hear today's priorities."
+                                "Good morning $displayName, how are you doing? Tap Read Daily Plan to hear your priorities."
                             },
                             style = MaterialTheme.typography.bodyLarge
                         )
@@ -330,35 +384,36 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 }
             }
 
-            // 3. SpeechRecognizer Voice Command Center
-            item {
-                VoiceRecognizerCard(
-                    isListening = isListening,
-                    partialTranscript = partialSpeech,
-                    errorMessage = voiceFeedbackError,
-                    onToggleListen = {
-                        if (isListening) {
-                            try {
-                                speechRecognizer?.stopListening()
-                            } catch (_: Exception) {
-                            }
-                            isListening = false
-                        } else {
-                            val hasPerm = ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.RECORD_AUDIO
-                            ) == PackageManager.PERMISSION_GRANTED
-                            if (hasPerm) {
-                                beginSpeechRecognition()
-                            } else {
-                                recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            // 4. Smart Email Tasks & Invoices (Add to Tasks)
+            if (actionableEmails.isNotEmpty()) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = CardShape8,
+                        colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                        border = BorderStroke(1.dp, TealAccent)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = "ACTIONABLE UNREAD EMAILS",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = TealAccent
+                            )
+                            actionableEmails.forEach { email ->
+                                ActionableEmailRow(
+                                    email = email,
+                                    onAddToTasks = { viewModel.promoteEmailToTask(email) }
+                                )
                             }
                         }
                     }
-                )
+                }
             }
 
-            // 4. Active PlannerEngine Proposal (Now / Later Today / Tomorrow / Drop)
+            // 5. Planner Recommendation Card
             activeProposal?.let { proposal ->
                 item {
                     ProposalDecisionCard(
@@ -369,7 +424,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 }
             }
 
-            // 5. Next Up Card
+            // 6. Next Up Card
             if (nextUpItem != null) {
                 item {
                     NextUpCard(
@@ -386,14 +441,26 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 }
             }
 
-            // 6. Recent Assistant Conversation Feed
+            // 7. Coach Conversation Feed
             if (conversationTurns.isNotEmpty()) {
                 item {
-                    Text(
-                        text = "RECENT CONVERSATION",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = TextMutedDark
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "COACH CONVERSATION",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextMutedDark
+                        )
+                        Text(
+                            text = "Clear History",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextMutedDark,
+                            modifier = Modifier.clickable { viewModel.clearConversationHistory() }
+                        )
+                    }
                 }
                 items(conversationTurns.take(12).reversed(), key = { it.id }) { turn ->
                     ConversationTurnBubble(
@@ -404,7 +471,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
             }
         }
 
-        // Bottom Universal Text + Voice Input Bar
+        // Bottom Universal Chat Bar
         Surface(
             color = SurfaceDark,
             border = BorderStroke(1.dp, BorderDark),
@@ -422,7 +489,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                     onValueChange = { inputText = it },
                     placeholder = {
                         Text(
-                            "Tell me anything (tasks, reminders, notes)...",
+                            "Ask your coach, check email, or 'Note: ...'",
                             color = TextMutedDark
                         )
                     },
@@ -466,18 +533,21 @@ fun HomeScreen(viewModel: AssistantViewModel) {
 }
 
 @Composable
-private fun VoiceRecognizerCard(
+private fun CenteredMicrophoneHero(
     isListening: Boolean,
+    isThinking: Boolean,
+    isSpeaking: Boolean,
     partialTranscript: String,
     errorMessage: String?,
-    onToggleListen: () -> Unit
+    onToggleListen: () -> Unit,
+    onStopSpeech: () -> Unit
 ) {
     val pulseTransition = rememberInfiniteTransition(label = "mic_pulse")
     val pulseScale by pulseTransition.animateFloat(
         initialValue = 1.0f,
-        targetValue = if (isListening) 1.12f else 1.0f,
+        targetValue = if (isListening) 1.15f else 1.0f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 700),
+            animation = tween(durationMillis = 650),
             repeatMode = RepeatMode.Reverse
         ),
         label = "mic_scale"
@@ -487,22 +557,29 @@ private fun VoiceRecognizerCard(
         modifier = Modifier.fillMaxWidth(),
         shape = CardShape8,
         colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-        border = BorderStroke(1.dp, if (isListening) WarningRed else BorderDark)
+        border = BorderStroke(
+            width = 1.dp,
+            color = when {
+                isListening -> WarningRed
+                isThinking -> TealAccent
+                else -> BorderDark
+            }
+        )
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(vertical = 22.dp, horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(64.dp)
+                    .size(88.dp)
                     .scale(if (isListening) pulseScale else 1f)
                     .background(
-                        color = if (isListening) WarningRed else TealAccentContainer,
+                        color = if (isListening) WarningRed.copy(alpha = 0.2f) else TealAccentContainer,
                         shape = CircleShape
                     )
                     .border(
@@ -512,32 +589,146 @@ private fun VoiceRecognizerCard(
                     )
                     .clickable { onToggleListen() }
             ) {
-                Text(
-                    text = if (isListening) "STOP" else "MIC",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = if (isListening) TextPrimaryDark else TealAccent
+                MicrophoneVectorIcon(
+                    tint = if (isListening) WarningRed else TealAccent,
+                    modifier = Modifier.size(36.dp)
                 )
             }
 
+            Text(
+                text = when {
+                    isListening -> "Listening... Tap Mic to Stop"
+                    isThinking -> "Coach Brain Thinking..."
+                    isSpeaking -> "Speaking Reply..."
+                    else -> "Tap Microphone to Speak"
+                },
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center
+            )
+
+            Text(
+                text = when {
+                    isListening && partialTranscript.isNotBlank() -> "\"$partialTranscript\""
+                    isListening -> "Ask anything, say 'What did I get in my email today?', or 'Note: ...'"
+                    !errorMessage.isNullOrBlank() -> errorMessage
+                    else -> "Talk to your coach, check today's emails, or schedule reminders."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (!errorMessage.isNullOrBlank() && !isListening) WarningRed else TextMutedDark,
+                textAlign = TextAlign.Center
+            )
+
+            if (isSpeaking) {
+                OutlinedButton(
+                    onClick = onStopSpeech,
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, WarningRed)
+                ) {
+                    Text("Stop Speaking", color = WarningRed)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MicrophoneVectorIcon(
+    tint: Color,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val strokeWidth = w * 0.085f
+
+        // Mic capsule
+        val capsuleWidth = w * 0.34f
+        val capsuleHeight = h * 0.48f
+        val capsuleLeft = (w - capsuleWidth) / 2f
+        val capsuleTop = h * 0.08f
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(capsuleLeft, capsuleTop),
+            size = Size(capsuleWidth, capsuleHeight),
+            cornerRadius = CornerRadius(capsuleWidth / 2f, capsuleWidth / 2f),
+            style = Stroke(width = strokeWidth)
+        )
+
+        // U-shaped cradle arc
+        val arcWidth = w * 0.62f
+        val arcHeight = h * 0.48f
+        drawArc(
+            color = tint,
+            startAngle = 0f,
+            sweepAngle = 180f,
+            useCenter = false,
+            topLeft = Offset((w - arcWidth) / 2f, h * 0.26f),
+            size = Size(arcWidth, arcHeight),
+            style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+        )
+
+        // Vertical stem
+        drawLine(
+            color = tint,
+            start = Offset(w / 2f, h * 0.74f),
+            end = Offset(w / 2f, h * 0.90f),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round
+        )
+
+        // Base bar
+        drawLine(
+            color = tint,
+            start = Offset(w * 0.32f, h * 0.90f),
+            end = Offset(w * 0.68f, h * 0.90f),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round
+        )
+    }
+}
+
+@Composable
+private fun ActionableEmailRow(
+    email: UnreadEmailEntity,
+    onAddToTasks: () -> Unit
+) {
+    Surface(
+        color = SurfaceSubtleDark,
+        shape = CardShape8,
+        border = BorderStroke(1.dp, BorderDark),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 Text(
-                    text = if (isListening) "Listening via SpeechRecognizer..." else "Tap MIC for Voice Input",
-                    style = MaterialTheme.typography.titleMedium
+                    text = "${email.category} - ${email.sender}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TealAccent
                 )
                 Text(
-                    text = when {
-                        isListening && partialTranscript.isNotBlank() -> "\"$partialTranscript\""
-                        isListening -> "Say 'Read my daily plan', 'Remind me to text Chidi at 4pm', or add a task."
-                        !errorMessage.isNullOrBlank() -> errorMessage
-                        else -> "Hands-free capture for tasks, person reminders, notes, and plan readouts."
-                    },
+                    text = email.extractedTaskTitle ?: email.subject,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (!errorMessage.isNullOrBlank() && !isListening) WarningRed else TextMutedDark
+                    fontWeight = FontWeight.Medium
                 )
+            }
+            Button(
+                onClick = onAddToTasks,
+                shape = CardShape8,
+                colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Text("Add to Tasks", color = BgDark, fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -600,7 +791,7 @@ private fun NextUpCard(
     onOpenChat: (String) -> Unit
 ) {
     val dueText = item.dueAt?.let {
-        SimpleDateFormat("EEE HH:mm", Locale.getDefault()).format(Date(it))
+        SimpleDateFormat("EEE h:mm a", Locale.getDefault()).format(Date(it))
     } ?: "Flexible today"
 
     Card(
@@ -678,7 +869,7 @@ private fun ConversationTurnBubble(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (isUser) "YOU" else "ASSISTANT",
+                    text = if (isUser) "YOU" else "COACH",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (isUser) TextMutedDark else TealAccent
                 )

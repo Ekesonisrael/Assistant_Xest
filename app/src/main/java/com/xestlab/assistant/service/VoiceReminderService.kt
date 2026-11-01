@@ -8,11 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.media.MediaPlayer
 import android.os.Build
 import android.os.IBinder
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.xestlab.assistant.MainActivity
 import com.xestlab.assistant.R
@@ -26,11 +24,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import java.io.File
-import java.io.FileOutputStream
-import java.util.Locale
 
-class VoiceReminderService : Service(), TextToSpeech.OnInitListener {
+class VoiceReminderService : Service() {
 
     companion object {
         const val CHANNEL_ID = "xestlab_voice_channel"
@@ -39,19 +34,19 @@ class VoiceReminderService : Service(), TextToSpeech.OnInitListener {
         const val EXTRA_CUSTOM_TEXT = "extra_custom_text"
         const val EXTRA_BRIEFING_TITLE = "extra_briefing_title"
         const val EXTRA_BYPASS_QUIET = "extra_bypass_quiet"
+        const val EXTRA_IS_WAKE_UP = "extra_is_wake_up"
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var tts: TextToSpeech? = null
-    private var isTtsReady = false
-    private var pendingTextToSpeak: String? = null
-    private var pendingSpeechRate: Float = 1.0f
-    private var mediaPlayer: MediaPlayer? = null
+    private lateinit var securePrefs: SecurePreferences
+    private lateinit var voiceEngine: VoiceEngine
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
         ensureChannel()
-        tts = TextToSpeech(applicationContext, this)
+        securePrefs = SecurePreferences(applicationContext)
+        voiceEngine = VoiceEngine(applicationContext, securePrefs)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -62,9 +57,12 @@ class VoiceReminderService : Service(), TextToSpeech.OnInitListener {
             return START_NOT_STICKY
         }
 
-        val briefingTitle = intent?.getStringExtra(EXTRA_BRIEFING_TITLE) ?: "Daily Plan Briefing"
+        val briefingTitle = intent?.getStringExtra(EXTRA_BRIEFING_TITLE) ?: "Morning Daily Plan"
         val customText = intent?.getStringExtra(EXTRA_CUSTOM_TEXT)
         val bypassQuiet = intent?.getBooleanExtra(EXTRA_BYPASS_QUIET, false) ?: false
+        val isWakeUp = intent?.getBooleanExtra(EXTRA_IS_WAKE_UP, false) ?: false
+
+        acquireSpeechWakeLock()
 
         val fgNotification = buildForegroundNotification(briefingTitle)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -81,141 +79,79 @@ class VoiceReminderService : Service(), TextToSpeech.OnInitListener {
             val userPrefsStore = UserPreferencesDataStore(applicationContext)
             val prefs = userPrefsStore.getSnapshot()
 
-            if (!bypassQuiet && AlarmScheduler.isWithinQuietHours(prefs)) {
-                stopSelf()
+            if (!bypassQuiet && !isWakeUp && AlarmScheduler.isWithinQuietHours(prefs)) {
+                stopPlaybackAndFinish()
                 return@launch
             }
 
             val db = AppDatabase.getInstance(applicationContext)
             val repo = AssistantRepository(db, userPrefsStore)
-            val securePrefs = SecurePreferences(applicationContext)
 
             val spokenScript = when {
                 !customText.isNullOrBlank() -> customText
-                securePrefs.isAiEnabled && securePrefs.hasGeminiKey() -> {
-                    AiClient.generateCoachReminder(briefingTitle, db, prefs, securePrefs)
+                isWakeUp -> {
+                    // Natural 7:30 AM greeting: "Good morning King Israel, how are you doing? Let's start with..."
+                    AiClient.generateCoachBriefing(briefingTitle, db, prefs, securePrefs)
+                        ?: repo.buildSpokenDailyPlan(isWakeUpAlarm = true)
+                }
+                else -> {
+                    AiClient.generateCoachBriefing(briefingTitle, db, prefs, securePrefs)
                         ?: repo.buildSpokenDailyPlan(overrideGreetingPrefix = briefingTitle)
                 }
-                else -> repo.buildSpokenDailyPlan(overrideGreetingPrefix = briefingTitle)
             }
 
-            if (securePrefs.isFishAudioEnabled && securePrefs.fishAudioApiKey.isNotBlank()) {
-                val mp3Bytes = FishAudioClient.synthesizeMp3(
-                    text = spokenScript,
-                    apiKey = securePrefs.fishAudioApiKey,
-                    voiceId = securePrefs.fishAudioVoiceId
-                )
-                if (mp3Bytes != null && playMp3Bytes(mp3Bytes)) {
-                    return@launch
-                }
-            }
-
-            speakWithAndroidTts(spokenScript, prefs.voiceSpeed)
+            voiceEngine.speak(
+                text = spokenScript,
+                fallbackSpeechRate = prefs.voiceSpeed,
+                onComplete = { stopPlaybackAndFinish() }
+            )
         }
 
         return START_NOT_STICKY
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val engine = tts ?: return
-            val langResult = engine.setLanguage(Locale.getDefault())
-            if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                engine.setLanguage(Locale.US)
+    private fun acquireSpeechWakeLock() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (wakeLock?.isHeld != true) {
+                wakeLock = pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "xestlab:VoiceBriefingWakeLock"
+                ).apply {
+                    acquire(60_000L)
+                }
             }
-            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {}
-                override fun onDone(utteranceId: String?) {
-                    stopSelf()
-                }
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) {
-                    stopSelf()
-                }
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    stopSelf()
-                }
-            })
-            isTtsReady = true
-            pendingTextToSpeak?.let { text ->
-                pendingTextToSpeak = null
-                speakWithAndroidTts(text, pendingSpeechRate)
-            }
-        } else {
-            stopSelf()
-        }
-    }
-
-    private fun speakWithAndroidTts(text: String, rate: Float) {
-        if (!isTtsReady) {
-            pendingTextToSpeak = text
-            pendingSpeechRate = rate
-            return
-        }
-        val engine = tts
-        if (engine == null) {
-            stopSelf()
-            return
-        }
-        engine.setSpeechRate(rate.coerceIn(0.6f, 1.8f))
-        val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "xestlab_briefing_utt")
-        if (result == TextToSpeech.ERROR) {
-            stopSelf()
-        }
-    }
-
-    private fun playMp3Bytes(bytes: ByteArray): Boolean {
-        return try {
-            val tempFile = File(cacheDir, "briefing_tts.mp3")
-            FileOutputStream(tempFile).use { it.write(bytes) }
-            val player = MediaPlayer().apply {
-                setDataSource(tempFile.absolutePath)
-                setOnCompletionListener {
-                    it.release()
-                    mediaPlayer = null
-                    stopSelf()
-                }
-                setOnErrorListener { mp, _, _ ->
-                    mp.release()
-                    mediaPlayer = null
-                    stopSelf()
-                    true
-                }
-                prepare()
-                start()
-            }
-            mediaPlayer = player
-            true
         } catch (_: Exception) {
-            false
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        } catch (_: Exception) {
+        } finally {
+            wakeLock = null
         }
     }
 
     private fun stopPlaybackAndFinish() {
         try {
-            tts?.stop()
+            voiceEngine.stop()
         } catch (_: Exception) {
         }
-        try {
-            mediaPlayer?.stop()
-            mediaPlayer?.release()
-            mediaPlayer = null
-        } catch (_: Exception) {
-        }
+        releaseWakeLock()
         stopSelf()
     }
 
     override fun onDestroy() {
         serviceScope.cancel()
         try {
-            tts?.stop()
-            tts?.shutdown()
+            voiceEngine.shutdown()
         } catch (_: Exception) {
         }
-        try {
-            mediaPlayer?.release()
-        } catch (_: Exception) {
-        }
+        releaseWakeLock()
         super.onDestroy()
     }
 
@@ -226,7 +162,7 @@ class VoiceReminderService : Service(), TextToSpeech.OnInitListener {
             "Voice Briefings",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Spoken daily plan briefings and reminders"
+            description = "Active voice playback for morning plans and reminders"
         }
         manager.createNotificationChannel(channel)
     }
@@ -253,7 +189,7 @@ class VoiceReminderService : Service(), TextToSpeech.OnInitListener {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(title)
-            .setContentText("Reading your daily plan aloud")
+            .setContentText("Speaking your daily plan aloud")
             .setContentIntent(openPending)
             .addAction(0, "Stop", stopPending)
             .setOngoing(true)

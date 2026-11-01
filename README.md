@@ -1,97 +1,48 @@
-# Proactive Personal Assistant (Android)
+# Xestlab Proactive Personal Assistant (Android)
 
-Native Android (Kotlin, Jetpack Compose, Room) proactive personal assistant that works fully offline by default, with optional cloud AI enhancements (Gemini NLU & Coach, Fish Audio TTS, and read-only IMAP email checks).
-
----
-
-## 1. First-Launch Name Onboarding, Daily Plan TTS & Voice Input
-
-- **First-Launch Name Prompt (Jetpack DataStore)**: On first launch, `SetupScreen` prompts for your name and saves it in Jetpack `DataStore<Preferences>` (`UserPreferencesDataStore`).
-- **Personalized Home Greeting & Daily Plan Readout**: `HomeScreen` greets you by your saved DataStore name in 32sp Serif and reads out your daily plan aloud using native Android `TextToSpeech` (with one-tap **Read Daily Plan** and **Stop** controls).
-- **Android SpeechRecognizer Voice Input**: Tap the circular `MIC` button to capture spoken tasks, person reminders, notes, or commands (e.g., `"Read my daily plan"`) via `android.speech.SpeechRecognizer` with live partial transcripts.
-- **"Tell me anything"**: Universal voice and text bar accepting natural language goals, tasks, notes, reminders, or questions.
+Native Android (`Kotlin`, `Jetpack Compose`, `Room`, `DataStore`, `WorkManager`, `EncryptedSharedPreferences`) proactive personal assistant and executive coach built for **King Israel** (`com.xestlab.assistant`).
 
 ---
 
-## 2. Generic Items Architecture (Room v2)
-
-Unified `Item` entity replaces single-purpose tables:
-- `Item(id, type, title, details, dueAt, durationMinutes, priority, status, repeatRule, targetAmount, unit, progress, contactName, sourceText, createdAt)`
-- **Types supported**: `TASK`, `GOAL`, `NOTE`, `REMINDER`, `HABIT`.
-- **Non-Destructive Room Migration (v1 -> v2)**: Real SQL migration (`MIGRATION_1_2`) adds `items`, `facts`, and `conversation_turns` tables while preserving existing checklist data, daily logs, and revenue goals.
-- **Computed Daily Rate**: Goals with amounts and deadlines (e.g., "320 pages by Friday") compute daily required amounts (`(targetAmount - progress) / daysRemaining`) dynamically for any unit.
-- **Searchable Notes**: Notes can be searched by title or content, read aloud with one tap, or attached to exact reminders.
+## 1. Secure API Storage & Resilient Error Handling
+- **`EncryptedSharedPreferences` (`AES256_GCM`)**: Securely stores the Gemini API key, Groq API key, ElevenLabs API key, and IMAP app password via AndroidX Security Crypto (`MasterKey.KeyScheme.AES256_GCM`). Credentials are never stored in plain text or included in backup exports.
+- **Strict OkHttp Timeouts & Spoken Recovery**: All AI network calls run through `OkHttpClient` with strict connect/read/write/call timeouts and `try/catch` guards. If an API call fails or a key is invalid, the assistant speaks aloud:
+  > `"I cannot reach the AI brain right now. Check your internet or API key."`
 
 ---
 
-## 3. Planner: Now or Later
-
-When a new item or task arrives:
-1. Evaluates today's unfinished checklist, active alarms, and free time between user's wake time (default 06:30) and quiet hours (default 22:00).
-2. Proposes a recommendation: `Now`, `Later today at HH:mm`, `Tomorrow at HH:mm`, or `Drop`, accompanied by a one-sentence rationale.
-3. Shows interactive confirmation buttons and accepts spoken `yes` or `no`.
-4. **Guaranteed Safety**: Saves nothing to the database until explicitly accepted. Never reschedules existing items without user permission.
-
----
-
-## 4. How It Understands
-
-- **Online & AI Enabled**: Queries Gemini via standard `HttpURLConnection` and `org.json` with a 6-second timeout. Returns structured JSON `{"reply": "...", "actions": [...]}` supporting `create_item`, `update_item`, `complete_item`, `snooze`, `add_note`, `propose_plan`, `remember_fact`, and `read_emails`.
-- **Offline / AI Off**: A local intent parser (`AssistantParser.kt`) processes commands:
-  - `remind me to message <name> at <time>` -> Person reminder
-  - `remind me to <action> at/tomorrow <time>` -> Scheduled reminder
-  - `note: <text>` -> Searchable note
-  - `remember that <fact>` -> Persistent memory fact
-  - `add task <text>` -> Task item
-  - `done <title>` -> Completion
-  - *Fallback*: Unparsed text is saved as a note and explained clearly.
+## 2. Dual LLM Routing (Gemini & Groq)
+- **Settings Provider Toggle**: Switch seamlessly between **Gemini** and **Groq** in Settings (`Enable AI Brain Routing` + `Gemini` / `Groq` selector).
+- **Groq OpenAI-Compatible Endpoint**: Posts via `OkHttp` to `https://api.groq.com/openai/v1/chat/completions` with `Authorization: Bearer <Groq_API_Key>` using model `llama3-70b-8192` and parses the OpenAI JSON format (`choices[0].message.content`).
+- **Executive Coach System Prompt**:
+  > `"You are Xestlab Assistant, a strict but supportive business coach for King Israel. Keep replies conversational, short, and punchy."`
+- **Strict Note Discipline**: Conversational questions and voice chats are **never** saved as notes. Notes are only saved when explicitly prefixed with `"Note: [text]"` (or added directly on the Notes tab).
 
 ---
 
-## 5. Proactive Engine
-
-The assistant acts proactively in the background:
-- **Wake-up Alarm**: Uses `AlarmManager.setAlarmClock`. Sounds an alarm, speaks the day's plan, and repeats until dismissed or snoozed.
-- **Scheduled Briefings**: Morning (07:30), midday (12:30), evening (19:30), Sunday review (18:00), and custom times, utilizing exact alarms and foreground TTS with lifecycle `UtteranceProgressListener`.
-- **Person Reminders**: e.g., "remind me to message Tola at 4 pm". Posts a heads-up notification with action buttons: `[Open chat]`, `[Done]`, `[Snooze 15m]`. Tapping `Open chat` launches the system app chooser to message via WhatsApp or SMS. The app never sends messages autonomously.
-- **Read-Only IMAP Email Check**: WorkManager periodic check every 30 minutes with Wi-Fi only toggle. Identifies priority/urgent sender subjects; strictly suppresses voice read-aloud between 22:00 and wake-up time.
-- **Reboot & Update Recovery**: `BootReceiver` and `MY_PACKAGE_REPLACED` reschedule all alarms and workers.
+## 3. Proper Voice Engine (ElevenLabs + Natural Android TTS Fallback)
+- **ElevenLabs Primary Voice**: When an ElevenLabs API key is saved in Settings, speech routes through `https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM` (Rachel) and plays the returned MP3 via `MediaPlayer`.
+- **Natural Android TTS Fallback**: When no ElevenLabs key is configured (or offline), `VoiceEngine` falls back automatically to native Android `TextToSpeech` tuned to **`speechRate = 0.9f`** and **`pitch = 1.0f`**—used across daily briefings, congratulations prompts on task completion, chat responses, and alarms.
 
 ---
 
-## 6. Import from Web Goal Tracker
-
-Imports exported JSON from `index.html` (containing `settings`, `days`, `weeks`, `months`, `pipeline`):
-- Maps settings to `Goal` and `UserSettings`.
-- Maps days into `DailyLog`.
-- Maps pipeline stages (`setupOnce`, `everyDay`, `followUpCadence`, etc.) into `Item` tasks.
-- Maps months into `Item` revenue goals.
-- **Idempotent**: Prevents duplicates across re-imports.
+## 4. Smart Email Checker (IMAP to Task)
+- **30-Minute Background Sync**: `EmailCheckWorker` runs every 30 minutes via `WorkManager` over IMAPS (`993`) to read unread inbox messages into Room (`unread_emails` table, `AppDatabase` v3).
+- **AI + Heuristic Task & Invoice Extraction**: Unread messages that look like tasks or invoices are analyzed by the active LLM (with offline keyword fallback), trigger a notification with an **`Add to Tasks`** action button (`EmailTaskActionReceiver`), and appear on the Home screen with one-tap **`Add to Tasks`** promotion.
+- **Voice Email Query**: Ask `"What did I get in my email today?"` by voice or text to have the assistant read out unread email senders and subjects from the local Room cache.
 
 ---
 
-## 7. Data Safety, Privacy & Memory
-
-- **Strict Key Segregation**: Gemini API key, Fish Audio API key, and IMAP app passwords are stored strictly in app-private `SharedPreferences`. Keys never appear in code, logs, or JSON backup exports.
-- **Backup & Restore**: Settings > "Back up now" generates sanitized JSON and opens the Android share sheet. Sunday reminder prompts weekly backup.
-- **Memory Facts**: Table `facts(id, text, category, createdAt)` stores facts ("remember that..."), provides a view/delete dialog, and injects facts into the AI context.
-- **Chat History**: Persists the last 50 conversational turns with a dedicated "Clear History" button.
-
----
-
-## 8. Screens & Visual Design
-
-- **Four Navigation Tabs**: `Home`, `Plan`, `Notes`, `Settings`.
-- **Dark Theme by Default**: Background `#0E1412`, Cards `#161F1C`, Surface `#1E2A27`, Text `#F2F1EC`, Accent Teal `#2BA5A0`, Alert `#E05349`.
-- **Typography & Geometry**: 32sp system serif greeting on Home screen. Strict 8px corner radius throughout (`Shapes8px`). Zero pill buttons, zero gradients, zero emojis, zero em dashes.
+## 5. UI, Onboarding, JSON Pipeline & 7:30 AM Wake-Up Alarm
+- **First-Launch Name Onboarding (`DataStore`)**: Prompts for your name on first launch (pre-filled for `King Israel`) and persists it in Jetpack `DataStore<Preferences>`.
+- **Centered Home Microphone & Clean 4-Tab Bar**: Features a centered custom vector microphone button with live `SpeechRecognizer` transcript feedback and a clean 4-tab bottom navigation bar (`Home`, `Plan`, `Notes`, `Settings`).
+- **7:30 AM Device Wake-Up Alarm**: Scheduled with `AlarmManager.setAlarmClock`, wakes the screen with a `PARTIAL_WAKE_LOCK` + full-screen heads-up notification, and speaks naturally:
+  > `"Good morning King Israel, how are you doing? Let's start with..."`
+- **JSON Pipeline Import & Room v3**: Retains idempotent Web Goal Tracker JSON pipeline import, checklist completion congratulations TTS, Now-or-Later planner, person reminders, and memory facts.
 
 ---
 
-## 9. Signing & Build
-
-- **Debug Keystore**: Configured in `app/build.gradle.kts` using `app/debug.keystore` (password: `android`, alias: `androiddebugkey`, key password: `android`).
-- **GitHub Actions**: Continuous workflow in `.github/workflows/build-apk.yml` builds debug APK with `gradle/actions/setup-gradle` without requiring a wrapper JAR.
-- **Local Build**:
-  ```bash
-  gradle assembleDebug
-  ```
+## Build Debug APK
+```bash
+./gradlew assembleDebug
+```

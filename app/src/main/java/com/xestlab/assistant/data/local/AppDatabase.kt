@@ -13,6 +13,7 @@ import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.ReminderSchedule
+import com.xestlab.assistant.data.model.UnreadEmailEntity
 import com.xestlab.assistant.data.model.UserSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,9 +28,10 @@ import kotlinx.coroutines.launch
         UserSettings::class,
         Item::class,
         Fact::class,
-        ConversationTurn::class
+        ConversationTurn::class,
+        UnreadEmailEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -42,6 +44,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun itemDao(): ItemDao
     abstract fun factDao(): FactDao
     abstract fun conversationDao(): ConversationDao
+    abstract fun emailDao(): EmailDao
 
     companion object {
         @Volatile
@@ -49,7 +52,7 @@ abstract class AppDatabase : RoomDatabase() {
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE user_settings ADD COLUMN wakeUpTime TEXT NOT NULL DEFAULT '06:30'")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN wakeUpTime TEXT NOT NULL DEFAULT '07:30'")
                 db.execSQL(
                     """
                     CREATE TABLE IF NOT EXISTS `items` (
@@ -95,6 +98,28 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `unread_emails` (
+                        `id` TEXT NOT NULL PRIMARY KEY,
+                        `sender` TEXT NOT NULL,
+                        `subject` TEXT NOT NULL,
+                        `snippet` TEXT NOT NULL,
+                        `receivedAt` INTEGER NOT NULL,
+                        `isActionable` INTEGER NOT NULL,
+                        `category` TEXT NOT NULL,
+                        `extractedTaskTitle` TEXT,
+                        `addedToTasks` INTEGER NOT NULL,
+                        `notified` INTEGER NOT NULL,
+                        `fetchedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val appContext = context.applicationContext
@@ -103,7 +128,8 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "xestlab_assistant.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .fallbackToDestructiveMigrationOnDowngrade()
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)
@@ -162,11 +188,11 @@ abstract class AppDatabase : RoomDatabase() {
                 UserSettings(
                     id = 1,
                     userName = "",
-                    wakeUpTime = "06:30",
+                    wakeUpTime = "07:30",
                     quietHoursStart = "22:00",
                     quietHoursEnd = "07:00",
                     quietHoursEnabled = true,
-                    voiceSpeed = 1.0f,
+                    voiceSpeed = 0.9f,
                     isFirstRunComplete = false
                 )
             )
@@ -189,12 +215,6 @@ abstract class AppDatabase : RoomDatabase() {
                     unit = "pages",
                     progress = 40.0,
                     dueAt = System.currentTimeMillis() + 5 * 86400000L,
-                    status = "PENDING"
-                ),
-                Item(
-                    type = "NOTE",
-                    title = "Morning focus routine",
-                    details = "Complete deep focus block before checking social channels.",
                     status = "PENDING"
                 )
             )

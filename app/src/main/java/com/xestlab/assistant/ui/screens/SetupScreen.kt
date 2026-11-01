@@ -63,8 +63,12 @@ fun SetupScreen(
     val context = LocalContext.current
     val prefs by viewModel.prefsState.collectAsState()
 
-    var nameInput by remember(prefs.userName) { mutableStateOf(prefs.userName) }
-    var wakeUpInput by remember(prefs.wakeUpTime) { mutableStateOf(prefs.wakeUpTime) }
+    var nameInput by remember(prefs.userName) {
+        mutableStateOf(prefs.userName.ifBlank { "King Israel" })
+    }
+    var wakeUpInput by remember(prefs.wakeUpTime) {
+        mutableStateOf(prefs.wakeUpTime.ifBlank { "07:30" })
+    }
     var validationError by remember { mutableStateOf<String?>(null) }
 
     var micGranted by remember {
@@ -109,7 +113,7 @@ fun SetupScreen(
             manufacturer.contains("oppo") || manufacturer.contains("realme") || manufacturer.contains("oneplus") ->
                 "ColorOS / OxygenOS detected: Allow background activity and auto-launch in App Battery Management."
             else ->
-                "Keep battery optimization unrestricted so scheduled morning voice briefings run reliably."
+                "Keep battery optimization unrestricted so your 7:30 AM wake-up voice plan runs reliably."
         }
     }
 
@@ -126,12 +130,11 @@ fun SetupScreen(
             style = MaterialTheme.typography.headlineLarge
         )
         Text(
-            text = "Offline-first personal execution assistant with Android TextToSpeech daily briefings and SpeechRecognizer voice input.",
+            text = "Your executive business coach with encrypted Gemini/Groq routing, ElevenLabs + natural TTS voice, smart IMAP email checks, and 7:30 AM wake-up briefings.",
             style = MaterialTheme.typography.bodyMedium,
             color = TextMutedDark
         )
 
-        // Step 1: First-Launch Name & Wake-Up Time (Saved to Jetpack DataStore)
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = CardShape8,
@@ -143,11 +146,11 @@ fun SetupScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "1. What should I call you?",
+                    text = "1. Profile & 7:30 AM Wake-Up Alarm",
                     style = MaterialTheme.typography.titleMedium
                 )
                 Text(
-                    text = "Your name is saved locally in Jetpack DataStore and used to greet you and read out your daily plan.",
+                    text = "Saved locally in Jetpack DataStore and used to greet you every morning.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextMutedDark
                 )
@@ -159,7 +162,7 @@ fun SetupScreen(
                         if (validationError != null) validationError = null
                     },
                     label = { Text("Your Name") },
-                    placeholder = { Text("e.g. Israel") },
+                    placeholder = { Text("King Israel") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     shape = CardShape8,
@@ -177,8 +180,8 @@ fun SetupScreen(
                 OutlinedTextField(
                     value = wakeUpInput,
                     onValueChange = { wakeUpInput = it },
-                    label = { Text("Morning Wake-Up Briefing (HH:mm)") },
-                    placeholder = { Text("06:30") },
+                    label = { Text("Morning Wake-Up Alarm (HH:mm)") },
+                    placeholder = { Text("07:30") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     shape = CardShape8,
@@ -203,7 +206,6 @@ fun SetupScreen(
             }
         }
 
-        // Step 2: Voice & Proactive Permissions
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = CardShape8,
@@ -215,7 +217,7 @@ fun SetupScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "2. Voice & Alarm Permissions",
+                    text = "2. Voice & Wake Permissions",
                     style = MaterialTheme.typography.titleMedium
                 )
 
@@ -229,8 +231,8 @@ fun SetupScreen(
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     PermissionActionRow(
-                        title = "Notifications",
-                        status = if (notificationsGranted) "Granted" else "Recommended for reminders",
+                        title = "Heads-Up Notifications",
+                        status = if (notificationsGranted) "Granted" else "Required for 7:30 AM wake-up & email alerts",
                         buttonLabel = if (notificationsGranted) "Ready" else "Allow",
                         enabled = !notificationsGranted,
                         onClick = { notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
@@ -240,7 +242,7 @@ fun SetupScreen(
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     val exactAllowed = AlarmScheduler.canScheduleExactAlarms(context)
                     PermissionActionRow(
-                        title = "Exact Alarms",
+                        title = "Exact Wake-Up Alarms",
                         status = if (exactAllowed) "Allowed" else "Open settings to enable",
                         buttonLabel = "Configure",
                         enabled = true,
@@ -255,7 +257,7 @@ fun SetupScreen(
 
                 PermissionActionRow(
                     title = "Unrestricted Battery",
-                    status = if (isIgnoringBatteryOptimizations(context)) "Unrestricted" else "Recommended for wake briefings",
+                    status = if (isIgnoringBatteryOptimizations(context)) "Unrestricted" else "Recommended for 7:30 AM wake-up",
                     buttonLabel = "Optimize",
                     enabled = true,
                     onClick = {
@@ -268,7 +270,6 @@ fun SetupScreen(
             }
         }
 
-        // Step 3: OEM Tip & 60s Alarm Test
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = CardShape8,
@@ -294,7 +295,7 @@ fun SetupScreen(
                     border = BorderStroke(1.dp, TealAccent),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Test Voice Briefing in 60 Seconds", color = TealAccent)
+                    Text("Test Wake-Up Voice Plan in 60 Seconds", color = TealAccent)
                 }
             }
         }
@@ -304,7 +305,7 @@ fun SetupScreen(
         Button(
             onClick = {
                 if (nameInput.trim().isEmpty()) {
-                    validationError = "Please enter your name so I can save it to DataStore and greet you."
+                    validationError = "Please enter your name so I can save it to DataStore."
                 } else {
                     viewModel.completeFirstLaunch(nameInput.trim(), wakeUpInput.trim())
                     if (isReopenedFromSettings) {
@@ -319,7 +320,7 @@ fun SetupScreen(
                 .height(50.dp)
         ) {
             Text(
-                text = if (isReopenedFromSettings) "Save & Return" else "Save Name & Open Assistant",
+                text = if (isReopenedFromSettings) "Save & Return" else "Save Profile & Open Assistant",
                 fontWeight = FontWeight.SemiBold,
                 color = BgDark
             )

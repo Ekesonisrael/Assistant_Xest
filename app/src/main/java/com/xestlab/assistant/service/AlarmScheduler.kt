@@ -58,14 +58,18 @@ object AlarmScheduler {
         schedules: List<ReminderSchedule>,
         pendingItems: List<Item>
     ) {
-        scheduleWakeUpAlarm(context, wakeUpTime)
+        val cleanWake = wakeUpTime.trim().ifBlank { "07:30" }
+        scheduleWakeUpAlarm(context, cleanWake)
+
         schedules.forEach { schedule ->
-            if (schedule.isActive) {
+            // Avoid double-firing if Morning briefing has the exact same HH:mm as the Wake-Up alarm
+            if (schedule.isActive && !(schedule.id == "morning" && schedule.timeString.trim() == cleanWake)) {
                 scheduleDailyBriefing(context, schedule)
             } else {
                 cancelDailyBriefing(context, schedule.id)
             }
         }
+
         val now = System.currentTimeMillis()
         pendingItems.forEach { item ->
             val due = item.dueAt
@@ -75,16 +79,20 @@ object AlarmScheduler {
         }
     }
 
+    /**
+     * Schedules the 7:30 AM (or user-configured) morning wake-up alarm via setAlarmClock
+     * so Android wakes the device from Doze mode reliably.
+     */
     fun scheduleWakeUpAlarm(context: Context, wakeUpTime: String) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val mins = parseMinutesOfDay(wakeUpTime) ?: (6 * 60 + 30)
+        val mins = parseMinutesOfDay(wakeUpTime) ?: (7 * 60 + 30)
         val hour = mins / 60
         val minute = mins % 60
 
         val triggerAt = nextOccurrenceMillis(hour, minute, "ALL")
         val intent = Intent(context, AlarmReceiver::class.java).apply {
             putExtra(EXTRA_ALARM_ID, "wake_up_alarm")
-            putExtra(EXTRA_ALARM_TITLE, "Morning Wake-Up Briefing")
+            putExtra(EXTRA_ALARM_TITLE, "7:30 AM Morning Plan")
             putExtra(EXTRA_VOICE_ENABLED, true)
             putExtra(EXTRA_IS_WAKE_UP, true)
         }
@@ -95,7 +103,9 @@ object AlarmScheduler {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val showIntent = Intent(context, MainActivity::class.java)
+        val showIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
         val showPendingIntent = PendingIntent.getActivity(
             context,
             WAKE_UP_REQUEST_CODE + 1,
@@ -120,7 +130,7 @@ object AlarmScheduler {
             putExtra(EXTRA_ALARM_ID, schedule.id)
             putExtra(EXTRA_ALARM_TITLE, schedule.title)
             putExtra(EXTRA_VOICE_ENABLED, schedule.voiceEnabled)
-            putExtra(EXTRA_IS_WAKE_UP, false)
+            putExtra(EXTRA_IS_WAKE_UP, schedule.id == "morning")
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context,
@@ -201,8 +211,9 @@ object AlarmScheduler {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, AlarmReceiver::class.java).apply {
             putExtra(EXTRA_ALARM_ID, "test_alarm_1m")
-            putExtra(EXTRA_ALARM_TITLE, "Test Voice Briefing")
+            putExtra(EXTRA_ALARM_TITLE, "Morning Wake-Up Test")
             putExtra(EXTRA_VOICE_ENABLED, true)
+            putExtra(EXTRA_IS_WAKE_UP, true)
             putExtra(EXTRA_IS_TEST, true)
         }
         val pendingIntent = PendingIntent.getBroadcast(

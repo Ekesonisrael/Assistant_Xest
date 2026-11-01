@@ -41,7 +41,7 @@ class XestlabApplication : Application() {
             }
 
             val securePrefs = SecurePreferences(this@XestlabApplication)
-            if (securePrefs.isImapEnabled && securePrefs.imapUser.isNotBlank()) {
+            if (securePrefs.isImapEnabled && securePrefs.imapUser.isNotBlank() && securePrefs.imapPassword.isNotBlank()) {
                 EmailHelper.schedulePeriodicChecks(this@XestlabApplication, securePrefs.isImapWifiOnly)
             }
         }
@@ -55,18 +55,28 @@ class XestlabApplication : Application() {
             "Voice Briefings",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Spoken daily plan briefings via Android TextToSpeech"
+            description = "Spoken daily plan briefings via ElevenLabs or Android TextToSpeech"
         }
 
-        val alertsChannel = NotificationChannel(
+        val headsUpChannel = NotificationChannel(
             AlarmReceiver.ALERT_CHANNEL_ID,
-            "Reminders and Briefings",
+            "Wake-Up Alarms & Heads-Up Briefings",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "Scheduled briefings, task reminders, and person follow-up alerts"
+            description = "7:30 AM wake-up daily plan briefings and high-priority reminders"
+            enableVibration(true)
+        }
+
+        val emailChannel = NotificationChannel(
+            EmailHelper.EMAIL_CHANNEL_ID,
+            "Smart Email Tasks & Invoices",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Actionable tasks and invoices extracted from unread IMAP emails"
         }
 
         manager.createNotificationChannel(voiceChannel)
-        manager.createNotificationChannel(alertsChannel)
+        manager.createNotificationChannel(headsUpChannel)
+        manager.createNotificationChannel(emailChannel)
     }
 }

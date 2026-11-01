@@ -93,6 +93,12 @@ dependencies {
     // Jetpack DataStore Preferences (First-launch User Name & Settings)
     implementation(libs.androidx.datastore.preferences)
 
+    // EncryptedSharedPreferences for API keys & IMAP credentials
+    implementation(libs.androidx.security.crypto)
+
+    // OkHttp for resilient Gemini, Groq, and ElevenLabs HTTP requests
+    implementation(libs.okhttp)
+
     // Room Persistence
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)

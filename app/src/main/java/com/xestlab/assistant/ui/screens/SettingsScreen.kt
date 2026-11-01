@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -39,6 +38,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.xestlab.assistant.data.LlmProvider
 import com.xestlab.assistant.ui.theme.BgDark
 import com.xestlab.assistant.ui.theme.BorderDark
 import com.xestlab.assistant.ui.theme.CardShape8
@@ -63,6 +63,8 @@ fun SettingsScreen(
     val goals by viewModel.goals.collectAsState()
     val reminders by viewModel.reminders.collectAsState()
     val facts by viewModel.allFacts.collectAsState()
+    val activeProvider by viewModel.activeProvider.collectAsState()
+    val aiEnabledState by viewModel.aiEnabledState.collectAsState()
 
     var nameField by remember(prefs.userName) { mutableStateOf(prefs.userName) }
     var wakeField by remember(prefs.wakeUpTime) { mutableStateOf(prefs.wakeUpTime) }
@@ -78,18 +80,25 @@ fun SettingsScreen(
 
     var showMemoryDialog by remember { mutableStateOf(false) }
 
-    // Optional IMAP fields
+    // Dual LLM Encrypted Credentials (Gemini & Groq)
+    var selectedProvider by remember(activeProvider) { mutableStateOf(activeProvider) }
+    var aiEnabled by remember(aiEnabledState) { mutableStateOf(aiEnabledState) }
+    var geminiModel by remember { mutableStateOf(viewModel.securePrefs.geminiModel) }
+    var geminiKeyInput by remember { mutableStateOf("") }
+    var groqModel by remember { mutableStateOf(viewModel.securePrefs.groqModel) }
+    var groqKeyInput by remember { mutableStateOf("") }
+
+    // ElevenLabs Encrypted Voice Key
+    var elevenLabsKeyInput by remember { mutableStateOf("") }
+    var hasElevenSaved by remember { mutableStateOf(viewModel.securePrefs.hasElevenLabsKey()) }
+
+    // Smart IMAP Encrypted Credentials
     var imapEnabled by remember { mutableStateOf(viewModel.securePrefs.isImapEnabled) }
     var imapHost by remember { mutableStateOf(viewModel.securePrefs.imapHost) }
     var imapPort by remember { mutableStateOf(viewModel.securePrefs.imapPort.toString()) }
     var imapUser by remember { mutableStateOf(viewModel.securePrefs.imapUser) }
     var imapPassword by remember { mutableStateOf("") }
     var imapWifiOnly by remember { mutableStateOf(viewModel.securePrefs.isImapWifiOnly) }
-
-    // Optional Gemini fields
-    var aiEnabled by remember { mutableStateOf(viewModel.securePrefs.isAiEnabled) }
-    var geminiModel by remember { mutableStateOf(viewModel.securePrefs.geminiModel) }
-    var geminiKeyInput by remember { mutableStateOf("") }
 
     var pendingExportJson by remember { mutableStateOf<String?>(null) }
 
@@ -147,20 +156,354 @@ fun SettingsScreen(
                 text = "Settings",
                 style = MaterialTheme.typography.headlineMedium
             )
+            Text(
+                text = "All API keys and IMAP passwords are encrypted with AES-256 EncryptedSharedPreferences.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextMutedDark
+            )
         }
 
-        // 1. DataStore Profile, Greeting Name & TextToSpeech Voice Settings
+        // 1. Dual LLM Routing (Gemini & Groq)
         item {
-            SettingsCard(title = "PROFILE & VOICE (DATASTORE)") {
+            SettingsCard(title = "DUAL AI BRAIN (GEMINI & GROQ - ENCRYPTED)") {
+                SettingsSwitchRow(
+                    label = "Route Chat & Voice to AI Coach",
+                    checked = aiEnabled,
+                    onCheckedChange = {
+                        aiEnabled = it
+                        viewModel.setAiRoutingEnabled(it)
+                    }
+                )
+
+                Text(
+                    text = "Active LLM Provider",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextMutedDark
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val isGemini = selectedProvider == LlmProvider.GEMINI
+                    if (isGemini) {
+                        Button(
+                            onClick = {
+                                selectedProvider = LlmProvider.GEMINI
+                                viewModel.setLlmProvider(LlmProvider.GEMINI)
+                            },
+                            shape = CardShape8,
+                            colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Gemini", color = BgDark, fontWeight = FontWeight.SemiBold)
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = {
+                                selectedProvider = LlmProvider.GEMINI
+                                viewModel.setLlmProvider(LlmProvider.GEMINI)
+                            },
+                            shape = CardShape8,
+                            border = BorderStroke(1.dp, BorderDark),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Gemini", color = TextPrimaryDark)
+                        }
+                    }
+
+                    val isGroq = selectedProvider == LlmProvider.GROQ
+                    if (isGroq) {
+                        Button(
+                            onClick = {
+                                selectedProvider = LlmProvider.GROQ
+                                viewModel.setLlmProvider(LlmProvider.GROQ)
+                            },
+                            shape = CardShape8,
+                            colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Groq (Llama 3 70B)", color = BgDark, fontWeight = FontWeight.SemiBold)
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = {
+                                selectedProvider = LlmProvider.GROQ
+                                viewModel.setLlmProvider(LlmProvider.GROQ)
+                            },
+                            shape = CardShape8,
+                            border = BorderStroke(1.dp, BorderDark),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Groq (Llama 3 70B)", color = TextPrimaryDark)
+                        }
+                    }
+                }
+
+                if (selectedProvider == LlmProvider.GEMINI) {
+                    SettingsTextField(
+                        value = geminiModel,
+                        onValueChange = { geminiModel = it },
+                        label = "Gemini Model"
+                    )
+                    SecretKeyTextField(
+                        value = geminiKeyInput,
+                        onValueChange = { geminiKeyInput = it },
+                        label = if (viewModel.securePrefs.hasGeminiKey()) {
+                            "Gemini API Key (Encrypted & Saved - enter new to replace)"
+                        } else {
+                            "Gemini API Key"
+                        }
+                    )
+                } else {
+                    SettingsTextField(
+                        value = groqModel,
+                        onValueChange = { groqModel = it },
+                        label = "Groq Model (default: llama3-70b-8192)"
+                    )
+                    SecretKeyTextField(
+                        value = groqKeyInput,
+                        onValueChange = { groqKeyInput = it },
+                        label = if (viewModel.securePrefs.hasGroqKey()) {
+                            "Groq API Key (Encrypted & Saved - enter new to replace)"
+                        } else {
+                            "Groq API Key (Bearer)"
+                        }
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.testActiveLlmConnection(
+                                provider = selectedProvider,
+                                geminiKeyDraft = geminiKeyInput,
+                                geminiModelDraft = geminiModel,
+                                groqKeyDraft = groqKeyInput,
+                                groqModelDraft = groqModel
+                            )
+                        },
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Test ${selectedProvider.name}", color = TealAccent)
+                    }
+
+                    Button(
+                        onClick = {
+                            viewModel.saveLlmSettings(
+                                aiEnabled = aiEnabled,
+                                provider = selectedProvider,
+                                geminiKeyInput = geminiKeyInput,
+                                geminiModel = geminiModel,
+                                groqKeyInput = groqKeyInput,
+                                groqModel = groqModel
+                            )
+                            geminiKeyInput = ""
+                            groqKeyInput = ""
+                            aiEnabled = viewModel.securePrefs.isAiEnabled
+                        },
+                        shape = CardShape8,
+                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Save Encrypted", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+
+        // 2. Proper Voice: ElevenLabs + Natural Android TTS Fallback (0.9x, Pitch 1.0)
+        item {
+            SettingsCard(title = "VOICE ENGINE (ELEVENLABS + 0.9X NATURAL FALLBACK)") {
+                Text(
+                    text = if (hasElevenSaved) {
+                        "ElevenLabs active (Voice ID: 21m00Tcm4TlvDq8ikWAM). Falls back to Android TTS (0.9x) if offline."
+                    } else {
+                        "Using Android TTS natural fallback (Speech rate 0.9x, Pitch 1.0). Add an ElevenLabs key below for studio neural voice."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextMutedDark
+                )
+
+                SecretKeyTextField(
+                    value = elevenLabsKeyInput,
+                    onValueChange = { elevenLabsKeyInput = it },
+                    label = if (hasElevenSaved) {
+                        "ElevenLabs API Key (Encrypted & Saved - enter new to replace)"
+                    } else {
+                        "ElevenLabs API Key (Optional)"
+                    }
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.testVoicePlayback(elevenLabsKeyInput)
+                            if (elevenLabsKeyInput.isNotBlank()) {
+                                hasElevenSaved = true
+                                elevenLabsKeyInput = ""
+                            }
+                        },
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Test Voice", color = TealAccent)
+                    }
+
+                    Button(
+                        onClick = {
+                            if (elevenLabsKeyInput.isNotBlank()) {
+                                viewModel.saveElevenLabsKey(elevenLabsKeyInput)
+                                hasElevenSaved = true
+                                elevenLabsKeyInput = ""
+                            }
+                        },
+                        shape = CardShape8,
+                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Save Voice Key", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                if (hasElevenSaved) {
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.saveElevenLabsKey("")
+                            hasElevenSaved = false
+                        },
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, BorderDark),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Clear ElevenLabs Key (Use Android TTS 0.9x)", color = WarningRed)
+                    }
+                }
+
+                Text(
+                    text = "Fallback Android TTS Speed: ${String.format(Locale.US, "%.2fx", voiceSpeedField)} (Default 0.90x, Pitch 1.0)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextMutedDark
+                )
+                Slider(
+                    value = voiceSpeedField,
+                    onValueChange = { voiceSpeedField = it },
+                    valueRange = 0.6f..1.4f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = TealAccent,
+                        activeTrackColor = TealAccent
+                    )
+                )
+            }
+        }
+
+        // 3. Smart IMAP Email Checker (Every 30 Minutes -> Task/Invoice)
+        item {
+            SettingsCard(title = "SMART EMAIL CHECKER (IMAP TO TASK - 30M)") {
+                SettingsSwitchRow(
+                    label = "Check Unread Emails Every 30 Minutes",
+                    checked = imapEnabled,
+                    onCheckedChange = { imapEnabled = it }
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SettingsTextField(
+                        value = imapHost,
+                        onValueChange = { imapHost = it },
+                        label = "IMAP Host",
+                        modifier = Modifier.weight(1f)
+                    )
+                    SettingsTextField(
+                        value = imapPort,
+                        onValueChange = { imapPort = it },
+                        label = "Port",
+                        modifier = Modifier.weight(0.45f)
+                    )
+                }
+                SettingsTextField(
+                    value = imapUser,
+                    onValueChange = { imapUser = it },
+                    label = "Email Address"
+                )
+                SecretKeyTextField(
+                    value = imapPassword,
+                    onValueChange = { imapPassword = it },
+                    label = if (viewModel.securePrefs.imapPassword.isNotBlank()) {
+                        "IMAP App Password (Encrypted & Saved - enter new to replace)"
+                    } else {
+                        "IMAP App Password"
+                    }
+                )
+                SettingsSwitchRow(
+                    label = "Wi-Fi Only",
+                    checked = imapWifiOnly,
+                    onCheckedChange = { imapWifiOnly = it }
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.syncEmailsNow(
+                                hostDraft = imapHost,
+                                portDraft = imapPort.toIntOrNull() ?: 993,
+                                userDraft = imapUser,
+                                passDraft = imapPassword
+                            )
+                            imapPassword = ""
+                        },
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Sync Unread Now", color = TealAccent)
+                    }
+                    Button(
+                        onClick = {
+                            viewModel.saveImapConfig(
+                                enabled = imapEnabled,
+                                host = imapHost,
+                                port = imapPort.toIntOrNull() ?: 993,
+                                user = imapUser,
+                                password = imapPassword,
+                                wifiOnly = imapWifiOnly
+                            )
+                            imapPassword = ""
+                        },
+                        shape = CardShape8,
+                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Save IMAP", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+
+        // 4. Profile & 7:30 AM Wake-Up Alarm (DataStore)
+        item {
+            SettingsCard(title = "PROFILE & 7:30 AM WAKE-UP ALARM (DATASTORE)") {
                 SettingsTextField(
                     value = nameField,
                     onValueChange = { nameField = it },
-                    label = "Your Name (DataStore)"
+                    label = "Your Name"
                 )
                 SettingsTextField(
                     value = wakeField,
                     onValueChange = { wakeField = it },
-                    label = "Morning Wake-Up Briefing (HH:mm)"
+                    label = "Morning Wake-Up Alarm (HH:mm, default 07:30)"
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -192,21 +535,6 @@ fun SettingsScreen(
                     onCheckedChange = { autoReadField = it }
                 )
 
-                Text(
-                    text = "TextToSpeech Speed: ${String.format(Locale.US, "%.1fx", voiceSpeedField)}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextMutedDark
-                )
-                Slider(
-                    value = voiceSpeedField,
-                    onValueChange = { voiceSpeedField = it },
-                    valueRange = 0.6f..1.8f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = TealAccent,
-                        activeTrackColor = TealAccent
-                    )
-                )
-
                 Button(
                     onClick = {
                         viewModel.updateProfilePreferences(
@@ -223,12 +551,12 @@ fun SettingsScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Save Profile to DataStore", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    Text("Save Profile & Wake-Up Alarm", color = BgDark, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
 
-        // 2. Scheduled Daily Briefings
+        // 5. Scheduled Daily Briefings
         item {
             SettingsCard(title = "PROACTIVE DAILY BRIEFINGS") {
                 reminders.forEach { schedule ->
@@ -297,9 +625,9 @@ fun SettingsScreen(
             }
         }
 
-        // 3. Memory Facts, Backup/Import & Setup Diagnostics
+        // 6. Memory, JSON Pipeline Import & Diagnostics
         item {
-            SettingsCard(title = "MEMORY, BACKUP & RELIABILITY") {
+            SettingsCard(title = "MEMORY, JSON PIPELINE IMPORT & BACKUP") {
                 OutlinedButton(
                     onClick = { showMemoryDialog = true },
                     shape = CardShape8,
@@ -332,7 +660,7 @@ fun SettingsScreen(
                         border = BorderStroke(1.dp, BorderDark),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Import JSON", color = TextPrimaryDark)
+                        Text("Import Pipeline JSON", color = TextPrimaryDark)
                     }
                 }
 
@@ -361,157 +689,7 @@ fun SettingsScreen(
                     border = BorderStroke(1.dp, TealAccent),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Open Permissions & 60s Alarm Test", color = TealAccent)
-                }
-            }
-        }
-
-        // 4. Optional Read-Only IMAP Email Checks
-        item {
-            SettingsCard(title = "OPTIONAL: READ-ONLY IMAP EMAIL CHECK") {
-                SettingsSwitchRow(
-                    label = "Enable Background Unread Checks",
-                    checked = imapEnabled,
-                    onCheckedChange = { imapEnabled = it }
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    SettingsTextField(
-                        value = imapHost,
-                        onValueChange = { imapHost = it },
-                        label = "IMAP Host",
-                        modifier = Modifier.weight(1f)
-                    )
-                    SettingsTextField(
-                        value = imapPort,
-                        onValueChange = { imapPort = it },
-                        label = "Port",
-                        modifier = Modifier.weight(0.45f)
-                    )
-                }
-                SettingsTextField(
-                    value = imapUser,
-                    onValueChange = { imapUser = it },
-                    label = "Email Address"
-                )
-                OutlinedTextField(
-                    value = imapPassword,
-                    onValueChange = { imapPassword = it },
-                    label = { Text("App Password (stored locally only)") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    shape = CardShape8,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = TealAccent,
-                        unfocusedBorderColor = BorderDark,
-                        focusedTextColor = TextPrimaryDark,
-                        unfocusedTextColor = TextPrimaryDark
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                SettingsSwitchRow(
-                    label = "Wi-Fi Only",
-                    checked = imapWifiOnly,
-                    onCheckedChange = { imapWifiOnly = it }
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            viewModel.testImapConnection(
-                                host = imapHost,
-                                port = imapPort.toIntOrNull() ?: 993,
-                                user = imapUser,
-                                password = imapPassword
-                            )
-                        },
-                        shape = CardShape8,
-                        border = BorderStroke(1.dp, BorderDark),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Test IMAP", color = TextPrimaryDark)
-                    }
-                    Button(
-                        onClick = {
-                            viewModel.saveImapConfig(
-                                enabled = imapEnabled,
-                                host = imapHost,
-                                port = imapPort.toIntOrNull() ?: 993,
-                                user = imapUser,
-                                password = imapPassword,
-                                wifiOnly = imapWifiOnly
-                            )
-                            imapPassword = ""
-                        },
-                        shape = CardShape8,
-                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Save IMAP", color = BgDark, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
-        }
-
-        // 5. Optional Cloud Reasoning (Strict Offline Fallback)
-        item {
-            SettingsCard(title = "OPTIONAL: CLOUD REASONING (OFFLINE BY DEFAULT)") {
-                SettingsSwitchRow(
-                    label = "Enable Optional Gemini Q&A",
-                    checked = aiEnabled,
-                    onCheckedChange = { aiEnabled = it }
-                )
-                SettingsTextField(
-                    value = geminiModel,
-                    onValueChange = { geminiModel = it },
-                    label = "Model Name"
-                )
-                OutlinedTextField(
-                    value = geminiKeyInput,
-                    onValueChange = { geminiKeyInput = it },
-                    label = {
-                        Text(
-                            if (viewModel.securePrefs.hasGeminiKey()) "Replace API Key (saved)" else "API Key (optional)"
-                        )
-                    },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    shape = CardShape8,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = TealAccent,
-                        unfocusedBorderColor = BorderDark,
-                        focusedTextColor = TextPrimaryDark,
-                        unfocusedTextColor = TextPrimaryDark
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = { viewModel.testGeminiConnection(geminiKeyInput, geminiModel) },
-                        shape = CardShape8,
-                        border = BorderStroke(1.dp, BorderDark),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Test Key", color = TextPrimaryDark)
-                    }
-                    Button(
-                        onClick = {
-                            viewModel.saveGeminiConfig(aiEnabled, geminiKeyInput, geminiModel)
-                            geminiKeyInput = ""
-                        },
-                        shape = CardShape8,
-                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Save", color = BgDark, fontWeight = FontWeight.SemiBold)
-                    }
+                    Text("Permissions & 60s Wake-Up Alarm Test", color = TealAccent)
                 }
             }
         }
@@ -566,6 +744,32 @@ private fun SettingsTextField(
             unfocusedLabelColor = TextMutedDark
         ),
         modifier = modifier
+    )
+}
+
+@Composable
+private fun SecretKeyTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        visualTransformation = PasswordVisualTransformation(),
+        singleLine = true,
+        shape = CardShape8,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = TealAccent,
+            unfocusedBorderColor = BorderDark,
+            focusedTextColor = TextPrimaryDark,
+            unfocusedTextColor = TextPrimaryDark,
+            cursorColor = TealAccent,
+            focusedLabelColor = TealAccent,
+            unfocusedLabelColor = TextMutedDark
+        ),
+        modifier = Modifier.fillMaxWidth()
     )
 }
 

@@ -10,6 +10,7 @@ import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.ReminderSchedule
+import com.xestlab.assistant.data.model.UnreadEmailEntity
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
@@ -41,6 +42,7 @@ class AssistantRepository(
     val pendingItems: Flow<List<Item>> = db.itemDao().observePendingItems()
     val allFacts: Flow<List<Fact>> = db.factDao().observeAllFacts()
     val conversationTurns: Flow<List<ConversationTurn>> = db.conversationDao().observeTurns()
+    val unreadEmails: Flow<List<UnreadEmailEntity>> = db.emailDao().observeRecentUnread()
 
     fun getLogsForDate(date: String): Flow<List<DailyLog>> =
         db.dailyLogDao().observeLogsForDate(date)
@@ -102,6 +104,57 @@ class AssistantRepository(
     suspend fun deleteReminder(reminder: ReminderSchedule) =
         db.reminderDao().deleteReminder(reminder)
 
+    suspend fun promoteEmailToTask(email: UnreadEmailEntity): Long {
+        val taskTitle = email.extractedTaskTitle?.takeIf { it.isNotBlank() }
+            ?: "Follow up email: ${email.subject}"
+        val id = db.itemDao().insertItem(
+            Item(
+                type = "TASK",
+                title = taskTitle,
+                details = "From ${email.sender}: ${email.subject}. ${email.snippet}".take(280),
+                priority = "HIGH",
+                status = "PENDING",
+                sourceText = "imap_email_${email.id}"
+            )
+        )
+        db.emailDao().markAddedToTasks(email.id)
+        return id
+    }
+
+    suspend fun buildUnreadEmailSpokenSummary(): String {
+        val allCached = db.emailDao().getRecentUnreadDirect(20)
+        if (allCached.isEmpty()) {
+            return "You have no unread emails cached right now. If IMAP is enabled in Settings, tap Sync Now or wait for the next 30-minute check."
+        }
+
+        val cal = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val todayStart = cal.timeInMillis
+        val todaysEmails = allCached.filter { it.receivedAt >= todayStart }
+        val targetList = if (todaysEmails.isNotEmpty()) todaysEmails else allCached
+
+        val header = if (todaysEmails.isNotEmpty()) {
+            "You received ${todaysEmails.size} unread ${if (todaysEmails.size == 1) "email" else "emails"} today. "
+        } else {
+            "No new unread emails arrived today, but you have ${allCached.size} unread in your inbox. "
+        }
+
+        val subjectsText = targetList.take(5).mapIndexed { index, email ->
+            val tag = when (email.category) {
+                "INVOICE" -> "Invoice from ${email.sender}"
+                "TASK" -> "Action item from ${email.sender}"
+                else -> "From ${email.sender}"
+            }
+            "${index + 1}: $tag, subject: ${email.subject}"
+        }.joinToString(". ")
+
+        return "$header$subjectsText."
+    }
+
     suspend fun getWeeklySummary(weekStart: String, weekEnd: String): WeeklySummaryData {
         val goal = db.goalDao().getGoalsDirect() ?: Goal()
         val logs = db.dailyLogDao().getLogsBetweenDates(weekStart, weekEnd)
@@ -137,13 +190,16 @@ class AssistantRepository(
     }
 
     /**
-     * Builds the natural spoken summary of today's plan for Android TextToSpeech,
-     * greeting the user by their saved DataStore name.
+     * Builds the natural spoken summary of today's plan, greeting King Israel (or the user's
+     * saved DataStore name) warmly: "Good morning King Israel, how are you doing? Let's start with..."
      */
-    suspend fun buildSpokenDailyPlan(overrideGreetingPrefix: String? = null): String {
+    suspend fun buildSpokenDailyPlan(
+        overrideGreetingPrefix: String? = null,
+        isWakeUpAlarm: Boolean = false
+    ): String {
         AppDatabase.ensureSeeded(db)
         val prefs = userPreferences.getSnapshot()
-        val displayName = prefs.userName.ifBlank { "Friend" }
+        val displayName = prefs.userName.ifBlank { "King Israel" }
         val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
         val greetingWord = when {
             hour < 12 -> "Good morning"
@@ -159,34 +215,46 @@ class AssistantRepository(
             .filter { !it.sourceText.startsWith("web_pipeline_") }
 
         val sb = StringBuilder()
-        if (!overrideGreetingPrefix.isNullOrBlank()) {
-            sb.append("$overrideGreetingPrefix, $displayName. ")
-        } else {
-            sb.append("$greetingWord, $displayName. Here is your daily plan. ")
+        when {
+            isWakeUpAlarm || hour < 12 -> {
+                sb.append("Good morning $displayName, how are you doing? ")
+            }
+            !overrideGreetingPrefix.isNullOrBlank() -> {
+                sb.append("$overrideGreetingPrefix $displayName, how are you doing? ")
+            }
+            else -> {
+                sb.append("$greetingWord $displayName, here is where we stand today. ")
+            }
         }
 
         if (unfinishedChecklist.isEmpty() && pendingTasks.isEmpty()) {
-            sb.append("All of your core daily checklist items and scheduled tasks are complete. Great execution today.")
+            sb.append("Every single daily target and scheduled task is complete. Outstanding execution today.")
             return sb.toString()
         }
 
         if (unfinishedChecklist.isNotEmpty()) {
-            sb.append("You have ${unfinishedChecklist.size} core daily checklist ${if (unfinishedChecklist.size == 1) "item" else "items"} remaining, starting with ${unfinishedChecklist.first().title}. ")
+            sb.append("Let's start with ${unfinishedChecklist.first().title}. ")
+            if (unfinishedChecklist.size > 1) {
+                sb.append("You have ${unfinishedChecklist.size} core daily targets left on the board. ")
+            }
         }
 
         if (pendingTasks.isNotEmpty()) {
             val topTask = pendingTasks.first()
             val timeFormatted = topTask.dueAt?.let {
-                SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it))
+                SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(it))
             }
-            if (timeFormatted != null) {
+            if (unfinishedChecklist.isEmpty()) {
+                sb.append("Let's start with ${topTask.title}${if (timeFormatted != null) " scheduled for $timeFormatted" else ""}. ")
+            } else if (timeFormatted != null) {
                 sb.append("Next on your schedule at $timeFormatted is ${topTask.title}. ")
             } else {
-                sb.append("Your priority task is ${topTask.title}. ")
+                sb.append("Your priority task after that is ${topTask.title}. ")
             }
+
             val dailyPace = topTask.computeDailyRequired()
             if (dailyPace != null && topTask.unit != null) {
-                sb.append("Target pace is ${String.format(Locale.US, "%.0f", dailyPace)} ${topTask.unit} per day.")
+                sb.append("Required pace is ${String.format(Locale.US, "%.0f", dailyPace)} ${topTask.unit} per day.")
             }
         }
 

@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -36,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.xestlab.assistant.ui.screens.HomeScreen
@@ -80,7 +82,6 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
 
     val prefs = loadedPrefs
     if (prefs == null) {
-        // Initial DataStore snapshot loading
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -89,7 +90,6 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
         return
     }
 
-    // First-launch gate: prompt for user's name and save in Jetpack DataStore
     if (!prefs.isFirstLaunchComplete || prefs.userName.isBlank()) {
         SetupScreen(
             viewModel = viewModel,
@@ -117,24 +117,34 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
     Scaffold(
         containerColor = BgDark,
         bottomBar = {
-            NavigationBar(
-                containerColor = SurfaceDark,
-                tonalElevation = 0.dp
-            ) {
-                tabs.forEachIndexed { index, tab ->
-                    NavigationBarItem(
-                        selected = currentTab == index,
-                        onClick = { currentTab = index },
-                        icon = { Icon(imageVector = tab.icon, contentDescription = tab.label) },
-                        label = { Text(tab.label) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = TealAccent,
-                            selectedTextColor = TealAccent,
-                            indicatorColor = TealAccentContainer,
-                            unselectedIconColor = TextMutedDark,
-                            unselectedTextColor = TextMutedDark
+            Column(modifier = Modifier.fillMaxWidth()) {
+                HorizontalDivider(thickness = 1.dp, color = BorderDark)
+                NavigationBar(
+                    containerColor = SurfaceDark,
+                    tonalElevation = 0.dp
+                ) {
+                    tabs.forEachIndexed { index, tab ->
+                        val isSelected = currentTab == index
+                        NavigationBarItem(
+                            selected = isSelected,
+                            onClick = { currentTab = index },
+                            icon = { Icon(imageVector = tab.icon, contentDescription = tab.label) },
+                            label = {
+                                Text(
+                                    text = tab.label,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                            },
+                            alwaysShowLabel = true,
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = TealAccent,
+                                selectedTextColor = TealAccent,
+                                indicatorColor = TealAccentContainer,
+                                unselectedIconColor = TextMutedDark,
+                                unselectedTextColor = TextMutedDark
+                            )
                         )
-                    )
+                    }
                 }
             }
         }

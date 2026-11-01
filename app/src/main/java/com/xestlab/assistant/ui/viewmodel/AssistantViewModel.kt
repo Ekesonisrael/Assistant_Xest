@@ -1,8 +1,6 @@
 package com.xestlab.assistant.ui.viewmodel
 
 import android.app.Application
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.xestlab.assistant.ai.AiClient
@@ -10,6 +8,7 @@ import com.xestlab.assistant.ai.AssistantParser
 import com.xestlab.assistant.ai.ParsedIntent
 import com.xestlab.assistant.ai.PlannerEngine
 import com.xestlab.assistant.ai.PlannerProposal
+import com.xestlab.assistant.data.LlmProvider
 import com.xestlab.assistant.data.SecurePreferences
 import com.xestlab.assistant.data.UserPreferencesDataStore
 import com.xestlab.assistant.data.UserPreferencesState
@@ -21,11 +20,13 @@ import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.ReminderSchedule
+import com.xestlab.assistant.data.model.UnreadEmailEntity
 import com.xestlab.assistant.data.model.UserSettings
 import com.xestlab.assistant.data.repository.AssistantRepository
 import com.xestlab.assistant.data.repository.WeeklySummaryData
 import com.xestlab.assistant.service.AlarmScheduler
 import com.xestlab.assistant.service.EmailHelper
+import com.xestlab.assistant.service.VoiceEngine
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -40,7 +41,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-class AssistantViewModel(application: Application) : AndroidViewModel(application), TextToSpeech.OnInitListener {
+class AssistantViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
     val userPreferencesDataStore = UserPreferencesDataStore(appContext)
@@ -48,10 +49,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val repository = AssistantRepository(db, userPreferencesDataStore)
     val securePrefs = SecurePreferences(appContext)
 
-    private var tts: TextToSpeech? = null
-    private var isTtsReady = false
-    private var pendingSpeechText: String? = null
     private var hasAutoReadPlanInSession = false
+
+    private val _isSpeaking = MutableStateFlow(false)
+    val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
+
+    private val _isThinking = MutableStateFlow(false)
+    val isThinking: StateFlow<Boolean> = _isThinking.asStateFlow()
+
+    private val voiceEngine = VoiceEngine(
+        context = appContext,
+        securePrefs = securePrefs,
+        onSpeakingStateChanged = { speaking -> _isSpeaking.value = speaking }
+    )
 
     // Null only while initial DataStore read is in flight so MainActivity routes without flicker
     val userPrefsLoaded: StateFlow<UserPreferencesState?> = userPreferencesDataStore.preferencesFlow
@@ -60,9 +70,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     val prefsState: StateFlow<UserPreferencesState> = userPreferencesDataStore.preferencesFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, UserPreferencesState())
-
-    private val _isSpeaking = MutableStateFlow(false)
-    val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
 
     private val _dailyPlanSummary = MutableStateFlow("")
     val dailyPlanSummary: StateFlow<String> = _dailyPlanSummary.asStateFlow()
@@ -75,6 +82,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _noteSearchQuery = MutableStateFlow("")
     val noteSearchQuery: StateFlow<String> = _noteSearchQuery.asStateFlow()
+
+    private val _activeProvider = MutableStateFlow(securePrefs.llmProvider)
+    val activeProvider: StateFlow<LlmProvider> = _activeProvider.asStateFlow()
+
+    private val _aiEnabledState = MutableStateFlow(securePrefs.isAiEnabled)
+    val aiEnabledState: StateFlow<Boolean> = _aiEnabledState.asStateFlow()
 
     private val _weeklySummary = MutableStateFlow(
         WeeklySummaryData(
@@ -118,13 +131,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val conversationTurns: StateFlow<List<ConversationTurn>> = repository.conversationTurns
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val unreadEmails: StateFlow<List<UnreadEmailEntity>> = repository.unreadEmails
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val filteredNotes: StateFlow<List<Item>> = _noteSearchQuery
         .flatMapLatest { query -> repository.searchNotes(query) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
-        tts = TextToSpeech(appContext, this)
         viewModelScope.launch {
             AppDatabase.ensureSeeded(db)
             refreshDailyPlanText()
@@ -132,45 +147,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val engine = tts ?: return
-            val langRes = engine.setLanguage(Locale.getDefault())
-            if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
-                engine.setLanguage(Locale.US)
-            }
-            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {
-                    _isSpeaking.value = true
-                }
-
-                override fun onDone(utteranceId: String?) {
-                    _isSpeaking.value = false
-                }
-
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) {
-                    _isSpeaking.value = false
-                }
-
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    _isSpeaking.value = false
-                }
-            })
-            isTtsReady = true
-            pendingSpeechText?.let { queued ->
-                pendingSpeechText = null
-                speakText(queued)
-            }
-        }
-    }
-
     override fun onCleared() {
-        try {
-            tts?.stop()
-            tts?.shutdown()
-        } catch (_: Exception) {
-        }
+        voiceEngine.shutdown()
         super.onCleared()
     }
 
@@ -182,14 +160,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _statusBanner.value = message
     }
 
-    /**
-     * Saves the user's name on first launch into Jetpack DataStore, schedules proactive alarms,
-     * and reads out the personalized daily plan via Android TextToSpeech.
-     */
     fun completeFirstLaunch(userName: String, wakeUpTime: String) {
         val trimmedName = userName.trim()
         if (trimmedName.isBlank()) return
-        val cleanWake = wakeUpTime.trim().ifBlank { "06:30" }
+        val cleanWake = wakeUpTime.trim().ifBlank { "07:30" }
 
         viewModelScope.launch {
             userPreferencesDataStore.completeFirstLaunch(trimmedName, cleanWake)
@@ -198,6 +172,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     id = 1,
                     userName = trimmedName,
                     wakeUpTime = cleanWake,
+                    voiceSpeed = 0.9f,
                     isFirstRunComplete = true
                 )
             )
@@ -206,16 +181,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             AlarmScheduler.scheduleAllActive(appContext, cleanWake, schedules, pending)
 
             hasAutoReadPlanInSession = true
-            val script = repository.buildSpokenDailyPlan()
+            val script = repository.buildSpokenDailyPlan(isWakeUpAlarm = true)
             _dailyPlanSummary.value = script
             repository.recordTurn("ASSISTANT", script)
             speakText(script)
         }
     }
 
-    /**
-     * Triggers an automatic daily plan greeting readout once per session if enabled in DataStore.
-     */
     fun onHomeScreenDisplayed() {
         viewModelScope.launch {
             refreshDailyPlanText()
@@ -235,13 +207,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    /**
-     * Builds and speaks the user's daily plan aloud using Android TextToSpeech,
-     * greeting them by their DataStore userName.
-     */
     fun readDailyPlanAloud() {
         viewModelScope.launch {
-            val script = repository.buildSpokenDailyPlan()
+            val script = repository.buildSpokenDailyPlan(isWakeUpAlarm = true)
             _dailyPlanSummary.value = script
             repository.recordTurn("ASSISTANT", script)
             speakText(script)
@@ -250,35 +218,27 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun speakText(text: String) {
         if (text.isBlank()) return
-        val speed = prefsState.value.voiceSpeed.coerceIn(0.6f, 1.8f)
-        if (!isTtsReady) {
-            pendingSpeechText = text
-            _isSpeaking.value = true
-            return
-        }
-        val engine = tts ?: return
-        engine.setSpeechRate(speed)
-        _isSpeaking.value = true
-        val res = engine.speak(
-            text,
-            TextToSpeech.QUEUE_FLUSH,
-            null,
-            "xestlab_utt_${System.currentTimeMillis()}"
-        )
-        if (res == TextToSpeech.ERROR) {
-            _isSpeaking.value = false
-        }
+        val rate = prefsState.value.voiceSpeed.coerceIn(0.6f, 1.8f)
+        voiceEngine.speak(text = text, fallbackSpeechRate = rate)
     }
 
     fun stopSpeaking() {
-        pendingSpeechText = null
-        try {
-            tts?.stop()
-        } catch (_: Exception) {
-        }
-        _isSpeaking.value = false
+        voiceEngine.stop()
     }
 
+    fun clearConversationHistory() {
+        viewModelScope.launch {
+            repository.clearConversation()
+        }
+    }
+
+    /**
+     * Universal voice & text input handler:
+     * - ONLY saves Notes when user explicitly says "Note: [text]".
+     * - Answers "What did I get in my email today?" from the Room unread email cache.
+     * - Routes chat/questions to Gemini or Groq when AI toggle is ON and a key is saved,
+     *   speaking the exact error fallback if the API fails.
+     */
     fun handleUniversalInput(rawInput: String, isSpoken: Boolean = false) {
         val cleaned = rawInput.trim()
         if (cleaned.isEmpty()) return
@@ -286,24 +246,11 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             repository.recordTurn("USER", cleaned)
             val prefs = userPreferencesDataStore.getSnapshot()
-            val name = prefs.userName.ifBlank { "Friend" }
+            val name = prefs.userName.ifBlank { "King Israel" }
             val intent = AssistantParser.parse(cleaned)
 
             when (intent) {
-                is ParsedIntent.ReadPlan -> {
-                    val script = repository.buildSpokenDailyPlan()
-                    _dailyPlanSummary.value = script
-                    repository.recordTurn("ASSISTANT", script)
-                    speakText(script)
-                }
-
-                is ParsedIntent.RememberFact -> {
-                    repository.saveFact(intent.factText, intent.category)
-                    val reply = "Noted, $name. I will remember that ${intent.factText}."
-                    respond(reply, speak = true)
-                }
-
-                is ParsedIntent.Note -> {
+                is ParsedIntent.ExplicitNote -> {
                     repository.saveItem(
                         Item(
                             type = "NOTE",
@@ -312,8 +259,32 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                             sourceText = intent.sourceText
                         )
                     )
-                    val reply = "Saved to your notes: ${intent.title}."
-                    respond(reply, speak = isSpoken)
+                    respond("Note saved: ${intent.title}.", speak = true)
+                }
+
+                is ParsedIntent.CheckEmails -> {
+                    if (securePrefs.isImapEnabled &&
+                        securePrefs.imapUser.isNotBlank() &&
+                        securePrefs.imapPassword.isNotBlank() &&
+                        db.emailDao().getRecentUnreadDirect(1).isEmpty()
+                    ) {
+                        _isThinking.value = true
+                        EmailHelper.syncUnreadEmailsAndNotify(appContext, postNotifications = false)
+                        _isThinking.value = false
+                    }
+                    val emailSummary = repository.buildUnreadEmailSpokenSummary()
+                    respond(emailSummary, speak = true)
+                }
+
+                is ParsedIntent.ReadPlan -> {
+                    val script = repository.buildSpokenDailyPlan(isWakeUpAlarm = true)
+                    _dailyPlanSummary.value = script
+                    respond(script, speak = true)
+                }
+
+                is ParsedIntent.RememberFact -> {
+                    repository.saveFact(intent.factText, intent.category)
+                    respond("Locked into memory, $name: ${intent.factText}.", speak = true)
                 }
 
                 is ParsedIntent.Done -> {
@@ -330,15 +301,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                         refreshDailyPlanText()
                         refreshWeeklySummary()
-                        respond("Marked daily checklist item done: ${matchingChecklist.title}.", speak = true)
+                        respond("Well done $name! Completed: ${matchingChecklist.title}.", speak = true)
                     } else {
                         val matchingItem = db.itemDao().getItemByTitle(intent.targetQuery)
                         if (matchingItem != null) {
                             repository.updateItemStatus(matchingItem.id, "COMPLETED")
                             refreshDailyPlanText()
-                            respond("Completed task: ${matchingItem.title}.", speak = true)
+                            respond("Nice work $name! Checked off: ${matchingItem.title}.", speak = true)
                         } else {
-                            respond("Could not find an open item matching '${intent.targetQuery}'.", speak = isSpoken)
+                            routeChatToBrainOrOffline(cleaned, prefs)
                         }
                     }
                 }
@@ -359,8 +330,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         AlarmScheduler.scheduleItemReminder(appContext, savedItem)
                     }
                     refreshDailyPlanText()
-                    val formatted = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(intent.dueAt))
-                    respond("Person reminder set for $formatted: ${intent.actionTitle}.", speak = true)
+                    val formatted = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(intent.dueAt))
+                    respond("Reminder locked for $formatted: ${intent.actionTitle}.", speak = true)
                 }
 
                 is ParsedIntent.Reminder -> {
@@ -378,8 +349,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         AlarmScheduler.scheduleItemReminder(appContext, savedItem)
                     }
                     refreshDailyPlanText()
-                    val formatted = SimpleDateFormat("EEE HH:mm", Locale.getDefault()).format(Date(intent.dueAt))
-                    respond("Reminder scheduled for $formatted: ${intent.title}.", speak = true)
+                    val formatted = SimpleDateFormat("EEE h:mm a", Locale.getDefault()).format(Date(intent.dueAt))
+                    respond("Reminder set for $formatted: ${intent.title}.", speak = true)
                 }
 
                 is ParsedIntent.Goal -> {
@@ -397,7 +368,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     val daily = item.computeDailyRequired() ?: intent.targetAmount
                     val paceStr = String.format(Locale.US, "%.0f", daily)
                     respond(
-                        "Goal added: ${intent.title}. Daily pace required is $paceStr ${intent.unit} per day.",
+                        "Goal added: ${intent.title}. Daily target pace is $paceStr ${intent.unit} per day.",
                         speak = true
                     )
                 }
@@ -415,39 +386,51 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     _activeProposal.value = proposal
                     val recLabel = proposal.recommendation.name.replace('_', ' ')
                     respond(
-                        "Proposal ($recLabel) for '${candidate.title}': ${proposal.reason} Tap Accept or Drop.",
+                        "Planner suggests $recLabel for '${candidate.title}'. ${proposal.reason}",
                         speak = true
                     )
                 }
 
-                is ParsedIntent.Question -> {
-                    val aiReply = AiClient.generateAssistantResponse(
-                        userPrompt = intent.query,
-                        db = db,
-                        prefs = prefs,
-                        securePrefs = securePrefs
-                    )
-                    if (aiReply != null) {
-                        respond(aiReply.replyText, speak = true)
-                    } else {
-                        val offlineAnswer = repository.buildSpokenDailyPlan()
-                        _dailyPlanSummary.value = offlineAnswer
-                        respond(offlineAnswer, speak = true)
-                    }
-                }
-
-                is ParsedIntent.FallbackNote -> {
-                    repository.saveItem(
-                        Item(
-                            type = "NOTE",
-                            title = intent.text.take(60),
-                            details = intent.text,
-                            sourceText = intent.text
-                        )
-                    )
-                    respond("Captured in your notes: ${intent.text.take(60)}.", speak = isSpoken)
+                is ParsedIntent.ChatOrQuestion -> {
+                    routeChatToBrainOrOffline(intent.query, prefs)
                 }
             }
+        }
+    }
+
+    private suspend fun routeChatToBrainOrOffline(
+        userMessage: String,
+        prefs: UserPreferencesState
+    ) {
+        if (securePrefs.isAiEnabled) {
+            if (!securePrefs.hasActiveLlmKey()) {
+                respond(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE, speak = true)
+                return
+            }
+            _isThinking.value = true
+            val result = AiClient.generateAssistantResponse(
+                userPrompt = userMessage,
+                db = db,
+                prefs = prefs,
+                securePrefs = securePrefs
+            )
+            _isThinking.value = false
+
+            result.fold(
+                onSuccess = { aiResp ->
+                    respond(aiResp.replyText, speak = true)
+                },
+                onFailure = {
+                    respond(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE, speak = true)
+                }
+            )
+        } else {
+            val offlinePlan = repository.buildSpokenDailyPlan()
+            _dailyPlanSummary.value = offlinePlan
+            respond(
+                "$offlinePlan (Enable Gemini or Groq in Settings for full business coach conversation, or prefix with 'Note:' to save a note.)",
+                speak = true
+            )
         }
     }
 
@@ -479,10 +462,25 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun promoteEmailToTask(email: UnreadEmailEntity) {
+        viewModelScope.launch {
+            repository.promoteEmailToTask(email)
+            refreshDailyPlanText()
+            val name = prefsState.value.userName.ifBlank { "King Israel" }
+            _statusBanner.value = "Added email to your Tasks."
+            speakText("Added '${email.extractedTaskTitle ?: email.subject}' to your tasks, $name.")
+        }
+    }
+
+    /**
+     * Marks a task complete and speaks a congratulatory message.
+     */
     fun markTaskComplete(item: Item) {
         viewModelScope.launch {
             repository.updateItemStatus(item.id, "COMPLETED")
             refreshDailyPlanText()
+            val name = prefsState.value.userName.ifBlank { "King Israel" }
+            speakText("Well done $name! '${item.title}' is complete.")
         }
     }
 
@@ -517,11 +515,26 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _noteSearchQuery.value = query
     }
 
+    /**
+     * Toggles a daily checklist item and speaks congratulations TTS on completion.
+     */
     fun toggleChecklistDone(item: ChecklistItem, currentlyDone: Boolean, countValue: Int = 0) {
         viewModelScope.launch {
+            val name = prefsState.value.userName.ifBlank { "King Israel" }
             if (!currentlyDone) {
                 val count = if (item.isCountType && countValue <= 0) item.defaultTargetCount else countValue
                 repository.markItemDone(todayDateString, item.id, count)
+
+                val allChecklist = db.checklistDao().getAllItemsDirect()
+                val updatedLogs = db.dailyLogDao().getLogsForDateDirect(todayDateString).associateBy { it.itemId }
+                val allCompleted = allChecklist.isNotEmpty() && allChecklist.all { updatedLogs[it.id]?.isDone == true }
+
+                val congratsLine = if (allCompleted) {
+                    "Congratulations $name! Every single daily target is complete today. Elite discipline!"
+                } else {
+                    "Great work $name! ${item.title} is done. Keep pushing!"
+                }
+                speakText(congratsLine)
             } else {
                 repository.markItemNotDone(todayDateString, item.id, "Unchecked")
             }
@@ -551,7 +564,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun buildWeeklyReviewPlainText(): String {
         val w = _weeklySummary.value
         val g = goals.value
-        val name = prefsState.value.userName.ifBlank { "Studio" }
+        val name = prefsState.value.userName.ifBlank { "King Israel" }
         return buildString {
             appendLine("$name - 7-Day Execution Review ($todayDateString)")
             appendLine("Yearly Target: NGN ${String.format(Locale.US, "%,d", g.yearlyGoal)}")
@@ -582,9 +595,11 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 voiceSpeed = voiceSpeed,
                 autoReadPlanOnLaunch = autoReadOnLaunch
             )
-            AlarmScheduler.scheduleWakeUpAlarm(appContext, wakeUpTime)
+            val schedules = db.reminderDao().getAllRemindersDirect()
+            val pending = db.itemDao().getPendingItemsDirect()
+            AlarmScheduler.scheduleAllActive(appContext, wakeUpTime, schedules, pending)
             refreshDailyPlanText()
-            _statusBanner.value = "Saved profile & preferences to DataStore."
+            _statusBanner.value = "Saved profile & 7:30 AM wake-up schedule."
         }
     }
 
@@ -655,8 +670,99 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun scheduleOneMinuteTestAlarm() {
         AlarmScheduler.scheduleOneMinuteTest(appContext)
-        _statusBanner.value = "Test alarm scheduled. Lock screen or wait 60 seconds for voice briefing."
+        _statusBanner.value = "Test wake-up alarm set for 60 seconds from now."
     }
+
+    // --- Dual LLM & ElevenLabs Encrypted Settings ---
+
+    fun setAiRoutingEnabled(enabled: Boolean) {
+        securePrefs.isAiEnabled = enabled
+        _aiEnabledState.value = enabled
+    }
+
+    fun setLlmProvider(provider: LlmProvider) {
+        securePrefs.llmProvider = provider
+        _activeProvider.value = provider
+    }
+
+    fun saveLlmSettings(
+        aiEnabled: Boolean,
+        provider: LlmProvider,
+        geminiKeyInput: String,
+        geminiModel: String,
+        groqKeyInput: String,
+        groqModel: String
+    ) {
+        if (geminiKeyInput.isNotBlank()) {
+            securePrefs.geminiApiKey = geminiKeyInput.trim()
+        }
+        if (groqKeyInput.isNotBlank()) {
+            securePrefs.groqApiKey = groqKeyInput.trim()
+        }
+        securePrefs.geminiModel = geminiModel.trim().ifBlank { "gemini-2.5-flash" }
+        securePrefs.groqModel = groqModel.trim().ifBlank { "llama3-70b-8192" }
+        securePrefs.llmProvider = provider
+        _activeProvider.value = provider
+
+        val autoEnable = aiEnabled || geminiKeyInput.isNotBlank() || groqKeyInput.isNotBlank()
+        securePrefs.isAiEnabled = autoEnable
+        _aiEnabledState.value = autoEnable
+
+        _statusBanner.value = "Encrypted & saved ${provider.name} AI settings."
+    }
+
+    fun testActiveLlmConnection(
+        provider: LlmProvider,
+        geminiKeyDraft: String,
+        geminiModelDraft: String,
+        groqKeyDraft: String,
+        groqModelDraft: String
+    ) {
+        viewModelScope.launch {
+            _isThinking.value = true
+            val result = when (provider) {
+                LlmProvider.GEMINI -> {
+                    val key = geminiKeyDraft.trim().ifBlank { securePrefs.geminiApiKey }
+                    AiClient.testGeminiConnection(key, geminiModelDraft)
+                }
+                LlmProvider.GROQ -> {
+                    val key = groqKeyDraft.trim().ifBlank { securePrefs.groqApiKey }
+                    AiClient.testGroqConnection(key, groqModelDraft)
+                }
+            }
+            _isThinking.value = false
+
+            result.fold(
+                onSuccess = { reply ->
+                    _statusBanner.value = "${provider.name} connected: $reply"
+                    speakText(reply)
+                },
+                onFailure = {
+                    _statusBanner.value = "${provider.name} failed. Check internet or API key."
+                    speakText(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE)
+                }
+            )
+        }
+    }
+
+    fun saveElevenLabsKey(apiKeyInput: String) {
+        securePrefs.elevenLabsApiKey = apiKeyInput.trim()
+        _statusBanner.value = if (apiKeyInput.isBlank()) {
+            "Cleared ElevenLabs key. Using natural Android TTS (0.9x)."
+        } else {
+            "Encrypted & saved ElevenLabs voice key."
+        }
+    }
+
+    fun testVoicePlayback(elevenLabsDraftKey: String) {
+        if (elevenLabsDraftKey.isNotBlank()) {
+            securePrefs.elevenLabsApiKey = elevenLabsDraftKey.trim()
+        }
+        val displayName = prefsState.value.userName.ifBlank { "King Israel" }
+        speakText("Good morning $displayName, how are you doing? Xestlab Assistant voice is active and ready.")
+    }
+
+    // --- Smart IMAP Email Checker ---
 
     fun saveImapConfig(
         enabled: Boolean,
@@ -675,42 +781,37 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
         securePrefs.isImapWifiOnly = wifiOnly
 
-        if (enabled && user.isNotBlank()) {
+        if (enabled && user.isNotBlank() && securePrefs.imapPassword.isNotBlank()) {
             EmailHelper.schedulePeriodicChecks(appContext, wifiOnly)
-            _statusBanner.value = "IMAP background checks scheduled every 30 minutes."
+            _statusBanner.value = "Encrypted IMAP saved. Checking unread emails every 30 minutes."
+            syncEmailsNow()
         } else {
             EmailHelper.cancelPeriodicChecks(appContext)
-            _statusBanner.value = "IMAP background checks disabled."
+            _statusBanner.value = "IMAP background checks paused."
         }
     }
 
-    fun testImapConnection(host: String, port: Int, user: String, password: String) {
+    fun syncEmailsNow(
+        hostDraft: String? = null,
+        portDraft: Int? = null,
+        userDraft: String? = null,
+        passDraft: String? = null
+    ) {
         viewModelScope.launch {
-            val effectivePass = password.ifBlank { securePrefs.imapPassword }
-            val result = EmailHelper.testImapConnection(host, port, user, effectivePass)
+            if (!hostDraft.isNullOrBlank()) securePrefs.imapHost = hostDraft
+            if (portDraft != null) securePrefs.imapPort = portDraft
+            if (!userDraft.isNullOrBlank()) securePrefs.imapUser = userDraft
+            if (!passDraft.isNullOrBlank()) securePrefs.imapPassword = passDraft
+
+            val result = EmailHelper.syncUnreadEmailsAndNotify(appContext, postNotifications = true)
             _statusBanner.value = result.fold(
-                onSuccess = { it },
-                onFailure = { "IMAP error: ${it.message ?: "Connection failed"}" }
-            )
-        }
-    }
-
-    fun saveGeminiConfig(enabled: Boolean, apiKey: String, model: String) {
-        securePrefs.isAiEnabled = enabled
-        if (apiKey.isNotBlank()) {
-            securePrefs.geminiApiKey = apiKey
-        }
-        securePrefs.geminiModel = model
-        _statusBanner.value = if (enabled) "Optional Gemini reasoning enabled." else "Offline parser active."
-    }
-
-    fun testGeminiConnection(apiKey: String, model: String) {
-        viewModelScope.launch {
-            val keyToUse = apiKey.ifBlank { securePrefs.geminiApiKey }
-            val res = AiClient.testConnection(keyToUse, model)
-            _statusBanner.value = res.fold(
-                onSuccess = { "Gemini connected: $it" },
-                onFailure = { "Gemini error: ${it.message}" }
+                onSuccess = { list ->
+                    val actionableCount = list.count { it.isActionable }
+                    "Synced ${list.size} unread emails ($actionableCount actionable tasks/invoices)."
+                },
+                onFailure = { err ->
+                    "IMAP sync failed: ${err.message ?: "Check credentials or network"}"
+                }
             )
         }
     }
@@ -728,7 +829,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             refreshDailyPlanText()
             refreshWeeklySummary()
             _statusBanner.value = if (ok) {
-                "Imported backup and web tracker data successfully."
+                "Imported JSON pipeline, logs, and goals successfully."
             } else {
                 "Import failed: invalid JSON format."
             }

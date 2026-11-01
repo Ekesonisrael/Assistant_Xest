@@ -6,6 +6,14 @@ import java.util.Locale
 sealed class ParsedIntent {
     data object ReadPlan : ParsedIntent()
 
+    data object CheckEmails : ParsedIntent()
+
+    data class ExplicitNote(
+        val title: String,
+        val details: String,
+        val sourceText: String
+    ) : ParsedIntent()
+
     data class PersonReminder(
         val contactName: String,
         val actionTitle: String,
@@ -16,12 +24,6 @@ sealed class ParsedIntent {
     data class Reminder(
         val title: String,
         val dueAt: Long,
-        val sourceText: String
-    ) : ParsedIntent()
-
-    data class Note(
-        val title: String,
-        val details: String,
         val sourceText: String
     ) : ParsedIntent()
 
@@ -50,12 +52,12 @@ sealed class ParsedIntent {
         val targetQuery: String
     ) : ParsedIntent()
 
-    data class Question(
+    /**
+     * Any conversational message, question, or open voice prompt.
+     * Never saved as a Note (Notes require explicit "Note: [text]").
+     */
+    data class ChatOrQuestion(
         val query: String
-    ) : ParsedIntent()
-
-    data class FallbackNote(
-        val text: String
     ) : ParsedIntent()
 }
 
@@ -66,10 +68,52 @@ object AssistantParser {
         val lower = cleaned.lowercase(Locale.getDefault())
 
         if (cleaned.isEmpty()) {
-            return ParsedIntent.FallbackNote("")
+            return ParsedIntent.ChatOrQuestion("")
         }
 
-        // 1. Read daily plan voice/text command
+        // 1. STRICT Explicit Note Rule: ONLY save notes when user explicitly says "Note: [text]" (or "Note [text]")
+        val explicitNoteRegex = Regex("^(?:save\\s+note|note)\\s*[:\\-]\\s*(.+)$", RegexOption.IGNORE_CASE)
+        explicitNoteRegex.find(cleaned)?.let { match ->
+            val content = match.groupValues[1].trim()
+            if (content.isNotBlank()) {
+                return ParsedIntent.ExplicitNote(
+                    title = content.take(60),
+                    details = content,
+                    sourceText = cleaned
+                )
+            }
+        }
+        // SpokenSpeechRecognizer often omits the colon when user speaks "Note buy domain tomorrow"
+        val spokenNoteRegex = Regex("^note\\s+(.+)$", RegexOption.IGNORE_CASE)
+        if (!cleaned.endsWith("?")) {
+            spokenNoteRegex.find(cleaned)?.let { match ->
+                val content = match.groupValues[1].trim()
+                if (content.isNotBlank() && !content.lowercase(Locale.getDefault()).startsWith("that ")) {
+                    return ParsedIntent.ExplicitNote(
+                        title = content.take(60),
+                        details = content,
+                        sourceText = cleaned
+                    )
+                }
+            }
+        }
+
+        // 2. Smart Email Query ("What did I get in my email today?", "unread emails", "check my email")
+        if (
+            lower.contains("in my email") ||
+            lower.contains("unread email") ||
+            lower.contains("new email") ||
+            lower.contains("my emails") ||
+            lower == "check email" ||
+            lower == "check my email" ||
+            lower == "read my email" ||
+            lower == "read my emails" ||
+            (lower.contains("email") && (lower.startsWith("what ") || lower.startsWith("any ") || lower.contains("today")))
+        ) {
+            return ParsedIntent.CheckEmails
+        }
+
+        // 3. Read daily plan voice/text command
         if (
             lower == "read plan" ||
             lower == "read my plan" ||
@@ -84,7 +128,7 @@ object AssistantParser {
             return ParsedIntent.ReadPlan
         }
 
-        // 2. Remember fact ("remember that ...", "remember I ...")
+        // 4. Remember fact ("remember that ...")
         val rememberRegex = Regex("^(?:please\\s+)?remember\\s+(?:that\\s+)?(.+)$", RegexOption.IGNORE_CASE)
         rememberRegex.find(cleaned)?.let { match ->
             val factBody = match.groupValues[1].trim()
@@ -93,15 +137,7 @@ object AssistantParser {
             }
         }
 
-        // 3. Explicit Note ("note: ...", "save note ...", "jot down ...")
-        val noteRegex = Regex("^(?:save\\s+note|note|jot\\s+down)[:\\s,-]+(.+)$", RegexOption.IGNORE_CASE)
-        noteRegex.find(cleaned)?.let { match ->
-            val content = match.groupValues[1].trim()
-            val title = content.take(60)
-            return ParsedIntent.Note(title = title, details = content, sourceText = cleaned)
-        }
-
-        // 4. Mark item done ("done outreach", "completed study", "mark followups done")
+        // 5. Mark item done ("done outreach", "completed study", "mark followups done")
         val donePrefixRegex = Regex("^(?:done|completed|finished|check\\s+off)\\s+(.+)$", RegexOption.IGNORE_CASE)
         donePrefixRegex.find(cleaned)?.let { match ->
             return ParsedIntent.Done(targetQuery = match.groupValues[1].trim())
@@ -111,9 +147,9 @@ object AssistantParser {
             return ParsedIntent.Done(targetQuery = match.groupValues[1].trim())
         }
 
-        // 5. Person Reminder ("remind me to text Chidi at 4pm", "call Amaka in 30 minutes")
+        // 6. Person Reminder ("remind me to text Chidi at 4pm")
         val personRegex = Regex(
-            "^(?:remind\\s+me\\s+to\\s+)?(text|message|whatsapp|call|email|ping|reach\\s+out\\s+to)\\s+([A-Z][a-zA-Z0-9_'-]+|[a-zA-Z0-9_'-]+)(.*)$",
+            "^(?:remind\\s+me\\s+to\\s+)(text|message|whatsapp|call|email|ping|reach\\s+out\\s+to)\\s+([A-Z][a-zA-Z0-9_'-]+|[a-zA-Z0-9_'-]+)(.*)$",
             RegexOption.IGNORE_CASE
         )
         personRegex.find(cleaned)?.let { match ->
@@ -121,9 +157,7 @@ object AssistantParser {
             val personRaw = match.groupValues[2].trim()
             val remainder = match.groupValues[3].trim()
             val stopWords = setOf("my", "the", "a", "an", "all", "everyone", "back", "today", "tomorrow")
-            if (personRaw.lowercase(Locale.getDefault()) !in stopWords &&
-                (lower.startsWith("remind") || extractTimeMillis(cleaned, nowMillis) != null)
-            ) {
+            if (personRaw.lowercase(Locale.getDefault()) !in stopWords) {
                 val contactName = personRaw.replaceFirstChar {
                     if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString()
                 }
@@ -143,11 +177,16 @@ object AssistantParser {
             }
         }
 
-        // 6. Standard Reminder ("remind me to ... at 5pm / in 20 min")
+        // 7. Standard Reminder ("remind me to ... at 5pm / in 20 min")
         if (lower.startsWith("remind me") || lower.startsWith("set a reminder") || lower.startsWith("alert me")) {
             val dueAt = extractTimeMillis(cleaned, nowMillis) ?: (nowMillis + 60 * 60_000L)
-            val stripped = cleaned
-                .replace(Regex("^(?:remind\\s+me\\s+(?:to\\s+)?|set\\s+a\\s+reminder\\s+(?:to\\s+|for\\s+)?|alert\\s+me\\s+(?:to\\s+)?)", RegexOption.IGNORE_CASE), "")
+            val stripped = cleaned.replace(
+                Regex(
+                    "^(?:remind\\s+me\\s+(?:to\\s+)?|set\\s+a\\s+reminder\\s+(?:to\\s+|for\\s+)?|alert\\s+me\\s+(?:to\\s+)?)",
+                    RegexOption.IGNORE_CASE
+                ),
+                ""
+            )
             val title = stripTimePhrases(stripped).trim().ifBlank { stripped.trim() }
                 .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
             return ParsedIntent.Reminder(
@@ -157,60 +196,42 @@ object AssistantParser {
             )
         }
 
-        // 7. Numeric Goal with deadline ("read 300 pages by Friday", "send 50 messages in 7 days")
-        val goalRegex = Regex(
-            "^([a-zA-Z]+)\\s+(\\d+(?:\\.\\d+)?)\\s+([a-zA-Z]+)\\s+(?:by|in|within)\\s+(.+)$",
-            RegexOption.IGNORE_CASE
-        )
-        goalRegex.find(cleaned)?.let { match ->
-            val verb = match.groupValues[1]
-            val amount = match.groupValues[2].toDoubleOrNull()
-            val unit = match.groupValues[3]
-            if (amount != null && amount > 0) {
-                val dueAt = extractDeadlineMillis(match.groupValues[4], nowMillis)
-                val title = "${verb.replaceFirstChar { it.uppercase() }} ${match.groupValues[2]} $unit"
-                return ParsedIntent.Goal(
-                    title = title,
-                    targetAmount = amount,
-                    unit = unit,
-                    dueAt = dueAt,
-                    sourceText = cleaned
-                )
+        // 8. Numeric Goal with deadline ("read 300 pages by Friday")
+        if (!cleaned.endsWith("?")) {
+            val goalRegex = Regex(
+                "^([a-zA-Z]+)\\s+(\\d+(?:\\.\\d+)?)\\s+([a-zA-Z]+)\\s+(?:by|in|within)\\s+(.+)$",
+                RegexOption.IGNORE_CASE
+            )
+            goalRegex.find(cleaned)?.let { match ->
+                val verb = match.groupValues[1]
+                val amount = match.groupValues[2].toDoubleOrNull()
+                val unit = match.groupValues[3]
+                if (amount != null && amount > 0) {
+                    val dueAt = extractDeadlineMillis(match.groupValues[4], nowMillis)
+                    val title = "${verb.replaceFirstChar { it.uppercase() }} ${match.groupValues[2]} $unit"
+                    return ParsedIntent.Goal(
+                        title = title,
+                        targetAmount = amount,
+                        unit = unit,
+                        dueAt = dueAt,
+                        sourceText = cleaned
+                    )
+                }
             }
         }
 
-        // 8. Question ("what's on my schedule?", "how many tasks left?", "what is next?")
-        if (
-            cleaned.endsWith("?") ||
-            lower.startsWith("what ") ||
-            lower.startsWith("what's ") ||
-            lower.startsWith("when ") ||
-            lower.startsWith("how ") ||
-            lower.startsWith("who ") ||
-            lower.startsWith("show me ")
-        ) {
-            return ParsedIntent.Question(query = cleaned)
-        }
-
-        // 9. Actionable Task vs Fallback Note
-        val extractedDue = extractTimeMillis(cleaned, nowMillis)
-        val durationMins = extractDurationMinutes(cleaned)
-        val priority = when {
-            lower.contains("urgent") || lower.contains("asap") || lower.contains("important") || lower.contains("high priority") -> "HIGH"
-            lower.contains("low priority") || lower.contains("whenever") -> "LOW"
-            else -> "NORMAL"
-        }
-
-        val taskStarters = listOf(
-            "need to ", "i need to ", "todo ", "to-do ", "task:", "schedule ", "add task ",
-            "send ", "write ", "finish ", "prepare ", "review ", "build ", "record ",
-            "edit ", "publish ", "follow up", "update ", "study ", "plan ", "book ", "pay "
-        )
-        val looksLikeTask = extractedDue != null || taskStarters.any { lower.startsWith(it) }
-
-        if (looksLikeTask) {
+        // 9. Explicit Task command ("add task ...", "task: ...", "schedule ...")
+        val explicitTaskStarters = listOf("add task ", "task:", "todo:", "schedule ")
+        if (!cleaned.endsWith("?") && explicitTaskStarters.any { lower.startsWith(it) }) {
+            val extractedDue = extractTimeMillis(cleaned, nowMillis)
+            val durationMins = extractDurationMinutes(cleaned)
+            val priority = when {
+                lower.contains("urgent") || lower.contains("asap") || lower.contains("important") || lower.contains("high priority") -> "HIGH"
+                lower.contains("low priority") -> "LOW"
+                else -> "NORMAL"
+            }
             val cleanedTitle = cleaned
-                .replace(Regex("^(?:i\\s+need\\s+to|need\\s+to|add\\s+task|task:|todo:?|schedule)\\s+", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("^(?:add\\s+task|task:|todo:|schedule)\\s+", RegexOption.IGNORE_CASE), "")
                 .let { stripTimePhrases(it) }
                 .trim()
                 .ifBlank { cleaned }
@@ -225,13 +246,13 @@ object AssistantParser {
             )
         }
 
-        return ParsedIntent.FallbackNote(text = cleaned)
+        // 10. All other questions & chat go to ChatOrQuestion (NEVER saved as Notes)
+        return ParsedIntent.ChatOrQuestion(query = cleaned)
     }
 
     fun extractTimeMillis(input: String, nowMillis: Long = System.currentTimeMillis()): Long? {
         val lower = input.lowercase(Locale.getDefault())
 
-        // Relative "in X minutes / hours"
         val relMinRegex = Regex("\\bin\\s+(\\d+)\\s*(?:min|mins|minute|minutes)\\b")
         relMinRegex.find(lower)?.let { m ->
             val mins = m.groupValues[1].toLongOrNull() ?: return null
@@ -250,7 +271,6 @@ object AssistantParser {
             cal.add(Calendar.DAY_OF_YEAR, 1)
         }
 
-        // Explicit clock time: "at 4pm", "at 4:30 pm", "at 16:30", "by 9am"
         val clockRegex = Regex("\\b(?:at|by|for)\\s+(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?\\b")
         clockRegex.find(lower)?.let { m ->
             var hour = m.groupValues[1].toIntOrNull() ?: return null
@@ -259,8 +279,7 @@ object AssistantParser {
 
             if (ampm == "pm" && hour in 1..11) hour += 12
             if (ampm == "am" && hour == 12) hour = 0
-            if (ampm.isEmpty() && hour in 1..7) {
-                // Assume afternoon if ambiguous small number like "at 4"
+            if (ampm.isEmpty() && hour in 1..6) {
                 hour += 12
             }
 
@@ -296,13 +315,11 @@ object AssistantParser {
 
     private fun extractDeadlineMillis(deadlinePhrase: String, nowMillis: Long): Long {
         val lower = deadlinePhrase.lowercase(Locale.getDefault()).trim()
-        val daysRegex = Regex("(\\d+)\\s*days?")
-        daysRegex.find(lower)?.let { m ->
+        Regex("(\\d+)\\s*days?").find(lower)?.let { m ->
             val days = m.groupValues[1].toLongOrNull() ?: 7L
             return nowMillis + days * 86_400_000L
         }
-        val weeksRegex = Regex("(\\d+)\\s*weeks?")
-        weeksRegex.find(lower)?.let { m ->
+        Regex("(\\d+)\\s*weeks?").find(lower)?.let { m ->
             val weeks = m.groupValues[1].toLongOrNull() ?: 1L
             return nowMillis + weeks * 7L * 86_400_000L
         }

@@ -22,11 +22,11 @@ private val Context.userDataStore: DataStore<Preferences> by preferencesDataStor
 data class UserPreferencesState(
     val userName: String = "",
     val isFirstLaunchComplete: Boolean = false,
-    val wakeUpTime: String = "06:30",
+    val wakeUpTime: String = "07:30",
     val quietHoursStart: String = "22:00",
     val quietHoursEnd: String = "07:00",
     val quietHoursEnabled: Boolean = true,
-    val voiceSpeed: Float = 1.0f,
+    val voiceSpeed: Float = 0.9f,
     val autoReadPlanOnLaunch: Boolean = true
 )
 
@@ -55,11 +55,11 @@ class UserPreferencesDataStore(private val context: Context) {
             UserPreferencesState(
                 userName = prefs[KEY_USER_NAME] ?: "",
                 isFirstLaunchComplete = prefs[KEY_FIRST_LAUNCH_COMPLETE] ?: false,
-                wakeUpTime = prefs[KEY_WAKE_UP_TIME] ?: "06:30",
+                wakeUpTime = prefs[KEY_WAKE_UP_TIME] ?: "07:30",
                 quietHoursStart = prefs[KEY_QUIET_START] ?: "22:00",
                 quietHoursEnd = prefs[KEY_QUIET_END] ?: "07:00",
                 quietHoursEnabled = prefs[KEY_QUIET_ENABLED] ?: true,
-                voiceSpeed = prefs[KEY_VOICE_SPEED] ?: 1.0f,
+                voiceSpeed = prefs[KEY_VOICE_SPEED] ?: 0.9f,
                 autoReadPlanOnLaunch = prefs[KEY_AUTO_READ_PLAN] ?: true
             )
         }
@@ -68,12 +68,12 @@ class UserPreferencesDataStore(private val context: Context) {
         return preferencesFlow.first()
     }
 
-    suspend fun completeFirstLaunch(userName: String, wakeUpTime: String = "06:30") {
+    suspend fun completeFirstLaunch(userName: String, wakeUpTime: String = "07:30") {
         val cleanName = userName.trim()
         if (cleanName.isBlank()) return
         context.userDataStore.edit { prefs ->
             prefs[KEY_USER_NAME] = cleanName
-            prefs[KEY_WAKE_UP_TIME] = wakeUpTime.ifBlank { "06:30" }
+            prefs[KEY_WAKE_UP_TIME] = wakeUpTime.trim().ifBlank { "07:30" }
             prefs[KEY_FIRST_LAUNCH_COMPLETE] = true
         }
     }
@@ -112,7 +112,7 @@ class UserPreferencesDataStore(private val context: Context) {
 
     suspend fun saveWakeUpTime(wakeUpTime: String) {
         context.userDataStore.edit { prefs ->
-            prefs[KEY_WAKE_UP_TIME] = wakeUpTime.trim().ifBlank { "06:30" }
+            prefs[KEY_WAKE_UP_TIME] = wakeUpTime.trim().ifBlank { "07:30" }
         }
     }
 

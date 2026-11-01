@@ -12,6 +12,7 @@ import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.ReminderSchedule
+import com.xestlab.assistant.data.model.UnreadEmailEntity
 import com.xestlab.assistant.data.model.UserSettings
 import kotlinx.coroutines.flow.Flow
 
@@ -166,4 +167,31 @@ interface ConversationDao {
 
     @Query("DELETE FROM conversation_turns")
     suspend fun clearHistory()
+}
+
+@Dao
+interface EmailDao {
+    @Query("SELECT * FROM unread_emails ORDER BY receivedAt DESC LIMIT 25")
+    fun observeRecentUnread(): Flow<List<UnreadEmailEntity>>
+
+    @Query("SELECT * FROM unread_emails ORDER BY receivedAt DESC LIMIT :limit")
+    suspend fun getRecentUnreadDirect(limit: Int = 25): List<UnreadEmailEntity>
+
+    @Query("SELECT * FROM unread_emails WHERE id = :id LIMIT 1")
+    suspend fun getEmailById(id: String): UnreadEmailEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertEmails(emails: List<UnreadEmailEntity>)
+
+    @Query("UPDATE unread_emails SET addedToTasks = 1 WHERE id = :id")
+    suspend fun markAddedToTasks(id: String)
+
+    @Query("UPDATE unread_emails SET notified = 1 WHERE id = :id")
+    suspend fun markNotified(id: String)
+
+    @Query("DELETE FROM unread_emails WHERE id NOT IN (:activeIds)")
+    suspend fun pruneSyncedUnread(activeIds: List<String>)
+
+    @Query("DELETE FROM unread_emails")
+    suspend fun clearAllEmails()
 }

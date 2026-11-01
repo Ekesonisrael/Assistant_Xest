@@ -53,11 +53,11 @@ data class ReminderSchedule(
 data class UserSettings(
     @PrimaryKey val id: Int = 1,
     val userName: String = "",
-    val wakeUpTime: String = "06:30",
+    val wakeUpTime: String = "07:30",
     val quietHoursStart: String = "22:00",
     val quietHoursEnd: String = "07:00",
     val quietHoursEnabled: Boolean = true,
-    val voiceSpeed: Float = 1.0f,
+    val voiceSpeed: Float = 0.9f,
     val isFirstRunComplete: Boolean = false
 )
 
@@ -105,4 +105,19 @@ data class ConversationTurn(
     val text: String,
     val timestamp: Long = System.currentTimeMillis(),
     val actionsJson: String? = null
+)
+
+@Entity(tableName = "unread_emails")
+data class UnreadEmailEntity(
+    @PrimaryKey val id: String,
+    val sender: String,
+    val subject: String,
+    val snippet: String = "",
+    val receivedAt: Long = System.currentTimeMillis(),
+    val isActionable: Boolean = false,
+    val category: String = "GENERAL", // "TASK", "INVOICE", "GENERAL"
+    val extractedTaskTitle: String? = null,
+    val addedToTasks: Boolean = false,
+    val notified: Boolean = false,
+    val fetchedAt: Long = System.currentTimeMillis()
 )
