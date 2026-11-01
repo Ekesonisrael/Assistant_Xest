@@ -1,9 +1,5 @@
 package com.xestlab.assistant.service
 
-import ai.picovoice.porcupine.Porcupine
-import ai.picovoice.porcupine.PorcupineException
-import ai.picovoice.porcupine.PorcupineManager
-import ai.picovoice.porcupine.PorcupineManagerCallback
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
@@ -24,6 +20,7 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.xestlab.assistant.MainActivity
@@ -36,38 +33,41 @@ import com.xestlab.assistant.data.UserPreferencesDataStore
 import com.xestlab.assistant.data.local.AppDatabase
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.repository.AssistantRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.io.File
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Foreground Service running Picovoice Porcupine wake word detection in the background
- * and executing the hands-free Jarvis Conversation Loop:
- * 1. Detect custom wake word (.ppn loaded from assets/custom_wake_word.ppn or imported .ppn).
- * 2. Pause Porcupine mic stream & play activation chime.
- * 3. Speak via TTS: "Yes? What do you need?"
- * 4. Start Android SpeechRecognizer on the main thread to capture spoken command.
- * 5. Route spoken command to Gemini or Groq via AiClient.
- * 6. Speak AI response via TTS.
- * 7. Automatically resume Porcupine wake word detection in the background.
+ * Foreground Service running the 3-model openWakeWord ONNX Runtime pipeline
+ * (`melspectrogram.onnx` -> `embedding_model.onnx` -> `hey_jarvis_v0.1.onnx`) in a background
+ * Coroutine and executing the full Jarvis conversation loop when `score > 0.5`:
+ *
+ * 1. Stop the AudioRecord stream.
+ * 2. Play an activation chime.
+ * 3. Speak "Yes? What do you need?" via VoiceEngine (ElevenLabs or Android TTS fallback).
+ * 4. Start SpeechRecognizer to capture the user's spoken command.
+ * 5. Send the command to Groq ("openai/gpt-oss-120b").
+ * 6. Speak Groq's reply via VoiceEngine.
+ * 7. Restart the WakeWordService ONNX listening loop ("Listening for 'Hey Jarvis'...").
  */
 class WakeWordService : Service() {
 
     companion object {
+        private const val TAG = "WakeWordService"
+
         const val CHANNEL_ID = "xestlab_wake_word_channel"
         const val NOTIFICATION_ID = 7701
-
-        // Loaded from app/src/main/assets/custom_wake_word.ppn
-        const val ASSET_WAKE_WORD_PATH = "custom_wake_word.ppn"
-        const val IMPORTED_PPN_FILENAME = "imported_custom_wake_word.ppn"
+        const val ACTIVE_NOTIFICATION_TEXT = "Listening for 'Hey Jarvis'..."
 
         const val ACTION_START_OR_RELOAD = "com.xestlab.assistant.action.WAKE_START_OR_RELOAD"
         const val ACTION_STOP_SERVICE = "com.xestlab.assistant.action.WAKE_STOP_SERVICE"
@@ -79,7 +79,7 @@ class WakeWordService : Service() {
         val isRunningFlow: StateFlow<Boolean> = _isRunningFlow.asStateFlow()
 
         private val _statusMessageFlow = MutableStateFlow(
-            "Wake word service idle. Enter a Wake Word Name and Picovoice Access Key in Settings."
+            "openWakeWord ONNX service idle. Enable Wake Word in Settings to listen for 'Hey Jarvis'."
         )
         val statusMessageFlow: StateFlow<String> = _statusMessageFlow.asStateFlow()
 
@@ -102,7 +102,7 @@ class WakeWordService : Service() {
             val appContext = context.applicationContext
             if (!hasRecordAudioPermission(appContext)) {
                 updateExternalStatus(
-                    "Microphone permission (RECORD_AUDIO) is required before starting WakeWordService.",
+                    "RECORD_AUDIO permission is required before starting WakeWordService.",
                     true
                 )
                 return
@@ -113,6 +113,7 @@ class WakeWordService : Service() {
             try {
                 ContextCompat.startForegroundService(appContext, intent)
             } catch (e: Exception) {
+                Log.e(TAG, "Failed to start WakeWordService", e)
                 updateExternalStatus(
                     "Failed to start WakeWordService: ${e.javaClass.simpleName}: ${e.message}",
                     true
@@ -127,7 +128,7 @@ class WakeWordService : Service() {
             } catch (_: Exception) {
             }
             _isRunningFlow.value = false
-            updateExternalStatus("Background wake word detection stopped.", false)
+            updateExternalStatus("Background 'Hey Jarvis' wake word listener stopped.", false)
         }
 
         fun pauseTemporarily(context: Context) {
@@ -158,7 +159,7 @@ class WakeWordService : Service() {
             val appContext = context.applicationContext
             if (!hasRecordAudioPermission(appContext)) {
                 updateExternalStatus(
-                    "Grant Microphone permission first to test the Jarvis conversation loop.",
+                    "Grant RECORD_AUDIO permission first to test the Jarvis conversation loop.",
                     true
                 )
                 return
@@ -185,8 +186,10 @@ class WakeWordService : Service() {
     private lateinit var db: AppDatabase
     private lateinit var repository: AssistantRepository
 
+    private var openWakeWordPipeline: OpenWakeWordPipeline? = null
+    private var detectionLoopJob: Job? = null
+
     private var voiceEngine: VoiceEngine? = null
-    private var porcupineManager: PorcupineManager? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var toneGenerator: ToneGenerator? = null
 
@@ -197,13 +200,7 @@ class WakeWordService : Service() {
     private val recognizerWatchdogRunnable = Runnable {
         if (isInConversationLoop.get()) {
             destroySpeechRecognizerOnMain()
-            resumeWakeWordListeningOnMain()
-        }
-    }
-
-    private val wakeWordCallback = PorcupineManagerCallback { _ ->
-        mainHandler.post {
-            onWakeWordDetected()
+            restartWakeWordLoopOnMain()
         }
     }
 
@@ -213,6 +210,7 @@ class WakeWordService : Service() {
         userPrefsStore = UserPreferencesDataStore(applicationContext)
         db = AppDatabase.getInstance(applicationContext)
         repository = AssistantRepository(db, userPrefsStore)
+        openWakeWordPipeline = OpenWakeWordPipeline(applicationContext)
         voiceEngine = VoiceEngine(
             context = applicationContext,
             securePrefs = securePrefs
@@ -227,6 +225,7 @@ class WakeWordService : Service() {
             ACTION_STOP_SERVICE -> {
                 securePrefs.isWakeWordEnabled = false
                 updateExternalStatus("Wake word disabled from notification.", false)
+                stopDetectionCoroutine()
                 stopForegroundSafely()
                 stopSelf()
                 return START_NOT_STICKY
@@ -234,34 +233,28 @@ class WakeWordService : Service() {
 
             ACTION_TEMP_PAUSE -> {
                 isTemporarilyPausedForUiMic = true
-                mainHandler.post {
-                    pausePorcupineInternal()
-                    updateForegroundNotification("Paused briefly while in-app mic is active")
-                }
+                stopDetectionCoroutine()
+                updateForegroundNotification("Paused briefly while in-app mic is active")
                 return START_STICKY
             }
 
             ACTION_TEMP_RESUME -> {
                 isTemporarilyPausedForUiMic = false
-                mainHandler.post {
-                    if (!isInConversationLoop.get()) {
-                        resumeWakeWordListeningOnMain()
-                    }
+                if (!isInConversationLoop.get() && securePrefs.isWakeWordEnabled) {
+                    startOnnxDetectionLoop()
                 }
                 return START_STICKY
             }
 
             ACTION_TEST_JARVIS_LOOP -> {
-                if (!promoteToForeground("Testing Jarvis Conversation Loop...")) {
+                if (!promoteToForeground("Testing 'Hey Jarvis' conversation loop...")) {
                     stopSelf()
                     return START_NOT_STICKY
                 }
                 _isRunningFlow.value = true
-                if (porcupineManager == null && securePrefs.hasPicovoiceKey()) {
-                    initializePorcupineEngine()
-                }
+                stopDetectionCoroutine()
                 mainHandler.post {
-                    onWakeWordDetected()
+                    onWakeWordTriggered(score = 1.0f)
                 }
                 return START_STICKY
             }
@@ -269,144 +262,135 @@ class WakeWordService : Service() {
 
         if (!hasRecordAudioPermission(this)) {
             updateExternalStatus(
-                "Microphone permission (RECORD_AUDIO) is not granted. Enable mic permission first.",
+                "Microphone permission (RECORD_AUDIO) is required. Grant permission in Settings.",
                 true
             )
             stopSelf()
             return START_NOT_STICKY
         }
 
-        val configuredName = activeWakeWordLabel()
-        if (!promoteToForeground("Initializing wake word \"$configuredName\"...")) {
+        if (!promoteToForeground(ACTIVE_NOTIFICATION_TEXT)) {
             stopSelf()
             return START_NOT_STICKY
         }
 
         _isRunningFlow.value = true
         isTemporarilyPausedForUiMic = false
-        initializePorcupineEngine()
+
+        if (!isInConversationLoop.get()) {
+            startOnnxDetectionLoop()
+        }
 
         return START_STICKY
     }
 
-    private fun activeWakeWordLabel(): String {
-        return securePrefs.wakeWordName.ifBlank { "Assistant" }
-    }
-
-    private fun resolveKeywordPath(): String {
-        val importedFile = File(filesDir, IMPORTED_PPN_FILENAME)
-        return if (importedFile.exists() && importedFile.length() > 64L) {
-            importedFile.absolutePath
-        } else {
-            // Loads custom_wake_word.ppn directly from app/src/main/assets/
-            ASSET_WAKE_WORD_PATH
-        }
-    }
-
-    private fun initializePorcupineEngine() {
-        releasePorcupineInternal()
-
-        val accessKey = securePrefs.picovoiceAccessKey
-        val wakeName = activeWakeWordLabel()
-
-        if (accessKey.isBlank()) {
-            val msg = "No Picovoice Access Key found in EncryptedSharedPreferences. Save your Picovoice key in Settings."
-            updateExternalStatus(msg, true)
-            updateForegroundNotification("Missing Picovoice Access Key")
+    /**
+     * Starts the background Coroutine running the 3-model openWakeWord ONNX pipeline:
+     * AudioRecord (16kHz PCM) -> melspectrogram.onnx -> embedding_model.onnx -> hey_jarvis_v0.1.onnx
+     */
+    private fun startOnnxDetectionLoop() {
+        if (isStopping || isTemporarilyPausedForUiMic || isInConversationLoop.get()) {
             return
         }
 
-        val keywordPath = resolveKeywordPath()
-        try {
-            porcupineManager = PorcupineManager.Builder()
-                .setAccessKey(accessKey)
-                .setKeywordPath(keywordPath)
-                .setSensitivity(0.65f)
-                .build(applicationContext, wakeWordCallback)
+        stopDetectionCoroutine()
 
-            porcupineManager?.start()
+        val pipeline = openWakeWordPipeline ?: OpenWakeWordPipeline(applicationContext).also {
+            openWakeWordPipeline = it
+        }
 
-            val sourceDesc = if (keywordPath == ASSET_WAKE_WORD_PATH) {
-                "assets/$ASSET_WAKE_WORD_PATH"
-            } else {
-                "imported .ppn"
-            }
-            val okMsg = "Active — Listening for \"$wakeName\" ($sourceDesc)."
-            updateExternalStatus(okMsg, false)
-            updateForegroundNotification("Listening for \"$wakeName\"")
-        } catch (primaryError: PorcupineException) {
-            // If assets/custom_wake_word.ppn is still the placeholder file and the user typed a name
-            // matching a Porcupine built-in keyword (e.g., "Jarvis", "Computer", "Porcupine"),
-            // fall back cleanly so built-in names work immediately even before replacing the .ppn!
-            val matchedBuiltIn = findMatchingBuiltInKeyword(securePrefs.wakeWordName)
-            if (keywordPath == ASSET_WAKE_WORD_PATH && matchedBuiltIn != null) {
+        updateForegroundNotification(ACTIVE_NOTIFICATION_TEXT)
+        updateExternalStatus(
+            "$ACTIVE_NOTIFICATION_TEXT (ONNX 3-model pipeline: melspectrogram -> embedding -> hey_jarvis_v0.1, threshold > 0.5)",
+            false
+        )
+
+        detectionLoopJob = serviceScope.launch {
+            var lastUiReportMs = 0L
+            var peakRecentScore = 0.0f
+
+            while (!isStopping &&
+                !isTemporarilyPausedForUiMic &&
+                !isInConversationLoop.get() &&
+                securePrefs.isWakeWordEnabled
+            ) {
                 try {
-                    porcupineManager = PorcupineManager.Builder()
-                        .setAccessKey(accessKey)
-                        .setKeyword(matchedBuiltIn)
-                        .setSensitivity(0.65f)
-                        .build(applicationContext, wakeWordCallback)
+                    var triggeredScore: Float? = null
+                    pipeline.runDetectionLoop(
+                        onScoreUpdate = { score ->
+                            if (score > peakRecentScore) {
+                                peakRecentScore = score
+                            }
+                            val now = System.currentTimeMillis()
+                            if (now - lastUiReportMs >= 1_500L) {
+                                lastUiReportMs = now
+                                val formatted = String.format(Locale.US, "%.3f", peakRecentScore)
+                                updateExternalStatus(
+                                    "$ACTIVE_NOTIFICATION_TEXT | Peak score: $formatted (triggers > 0.500)",
+                                    false
+                                )
+                                peakRecentScore = 0.0f
+                            }
+                        },
+                        onDetected = { score ->
+                            triggeredScore = score
+                        }
+                    )
 
-                    porcupineManager?.start()
-                    val okBuiltInMsg =
-                        "Active — Listening for \"$wakeName\" (using Porcupine built-in ${matchedBuiltIn.name} keyword while assets/$ASSET_WAKE_WORD_PATH is placeholder)."
-                    updateExternalStatus(okBuiltInMsg, false)
-                    updateForegroundNotification("Listening for \"$wakeName\"")
-                    return
-                } catch (builtInErr: PorcupineException) {
-                    val errText =
-                        "PorcupineException: ${builtInErr.message ?: builtInErr.toString()}"
-                    updateExternalStatus(errText, true)
-                    updateForegroundNotification("Porcupine error — check Settings")
-                    return
+                    val hitScore = triggeredScore
+                    if (hitScore != null) {
+                        mainHandler.post {
+                            onWakeWordTriggered(hitScore)
+                        }
+                        break
+                    } else {
+                        break
+                    }
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    Log.e(TAG, "openWakeWord ONNX pipeline error: ${e.message}", e)
+                    updateExternalStatus(
+                        "ONNX pipeline error (${e.javaClass.simpleName}: ${e.message}). Retrying in 2s...",
+                        true
+                    )
+                    updateForegroundNotification("Wake word audio busy — retrying...")
+                    delay(2_000L)
                 }
             }
-
-            val errDetail = buildString {
-                append("PorcupineException loading $keywordPath for \"$wakeName\": ")
-                append(primaryError.message ?: primaryError.toString())
-                if (keywordPath == ASSET_WAKE_WORD_PATH) {
-                    append(" (Replace app/src/main/assets/custom_wake_word.ppn with your trained Picovoice .ppn for \"$wakeName\", or import your .ppn in Settings.)")
-                }
-            }
-            updateExternalStatus(errDetail, true)
-            updateForegroundNotification("Needs valid .ppn or Picovoice key — tap to check")
-        } catch (e: Exception) {
-            val unexpected = "${e.javaClass.simpleName}: ${e.message ?: e.toString()}"
-            updateExternalStatus(unexpected, true)
-            updateForegroundNotification("Wake word error — tap to view")
         }
     }
 
-    @Suppress("DEPRECATION")
-    private fun findMatchingBuiltInKeyword(rawWakeName: String): Porcupine.BuiltInKeyword? {
-        val normalized = rawWakeName.trim().replace(Regex("\\s+"), " ")
-        if (normalized.isEmpty()) return null
-        return Porcupine.BuiltInKeyword.values().firstOrNull { keyword ->
-            keyword.name.replace('_', ' ').equals(normalized, ignoreCase = true)
-        }
+    private fun stopDetectionCoroutine() {
+        openWakeWordPipeline?.stopAudioCapture()
+        val job = detectionLoopJob
+        detectionLoopJob = null
+        job?.cancel()
     }
 
     /**
-     * Step 1-3 of the Jarvis Conversation Loop when the wake word is detected:
-     * - Pause Porcupine mic capture
-     * - Play chime
-     * - Speak "Yes? What do you need?" via TTS
-     * - Automatically start SpeechRecognizer when TTS completes
+     * Triggered when `hey_jarvis_v0.1.onnx` score > 0.5:
+     * 1. AudioRecord stream is already stopped & released.
+     * 2. Play chime.
+     * 3. Speak "Yes? What do you need?" via VoiceEngine (ElevenLabs / Android TTS).
+     * 4. Start SpeechRecognizer to capture command.
      */
-    private fun onWakeWordDetected() {
+    private fun onWakeWordTriggered(score: Float) {
         if (isStopping) return
         if (!isInConversationLoop.compareAndSet(false, true)) return
 
-        val wakeName = activeWakeWordLabel()
-        pausePorcupineInternal()
+        stopDetectionCoroutine()
 
-        updateExternalStatus("Wake word \"$wakeName\" detected — playing chime & prompting...", false)
-        updateForegroundNotification("\"$wakeName\" detected — Prompting...")
+        val scoreStr = String.format(Locale.US, "%.2f", score)
+        updateExternalStatus(
+            "'Hey Jarvis' detected (score=$scoreStr) — playing chime & listening...",
+            false
+        )
+        updateForegroundNotification("'Hey Jarvis' detected — Prompting...")
 
         playActivationChime()
 
-        // Allow 220ms for the activation chime to finish cleanly before speaking
+        // Allow 220ms for chime to finish cleanly before speaking prompt
         mainHandler.postDelayed({
             if (isStopping) {
                 isInConversationLoop.set(false)
@@ -442,8 +426,7 @@ class WakeWordService : Service() {
     }
 
     /**
-     * Step 4 of the Jarvis Conversation Loop:
-     * Automatically starts Android SpeechRecognizer on the Main thread to listen to user's command.
+     * Starts Android SpeechRecognizer on the Main thread to capture the user's command.
      */
     private fun startCommandSpeechRecognizer() {
         if (isStopping) {
@@ -452,10 +435,10 @@ class WakeWordService : Service() {
         }
         if (!hasRecordAudioPermission(this) || !SpeechRecognizer.isRecognitionAvailable(this)) {
             updateExternalStatus(
-                "SpeechRecognizer unavailable or mic permission missing. Resuming wake word listener.",
+                "SpeechRecognizer unavailable or RECORD_AUDIO missing. Restarting 'Hey Jarvis' listener.",
                 true
             )
-            resumeWakeWordListeningOnMain()
+            restartWakeWordLoopOnMain()
             return
         }
 
@@ -475,10 +458,11 @@ class WakeWordService : Service() {
                 override fun onEndOfSpeech() {}
 
                 override fun onError(error: Int) {
+                    Log.w(TAG, "SpeechRecognizer error code=$error; restarting wake word loop")
                     mainHandler.removeCallbacks(recognizerWatchdogRunnable)
                     destroySpeechRecognizerOnMain()
                     mainHandler.postDelayed({
-                        resumeWakeWordListeningOnMain()
+                        restartWakeWordLoopOnMain()
                     }, 250L)
                 }
 
@@ -489,9 +473,9 @@ class WakeWordService : Service() {
                     destroySpeechRecognizerOnMain()
 
                     if (spokenCommand.isEmpty()) {
-                        resumeWakeWordListeningOnMain()
+                        restartWakeWordLoopOnMain()
                     } else {
-                        processSpokenCommandAndReply(spokenCommand)
+                        routeCommandToGroqAndSpeak(spokenCommand)
                     }
                 }
 
@@ -519,21 +503,20 @@ class WakeWordService : Service() {
             mainHandler.postDelayed(recognizerWatchdogRunnable, 15_000L)
             recognizer.startListening(recognizeIntent)
         } catch (e: Exception) {
+            Log.e(TAG, "SpeechRecognizer failed to start: ${e.message}", e)
             mainHandler.removeCallbacks(recognizerWatchdogRunnable)
             destroySpeechRecognizerOnMain()
             updateExternalStatus("SpeechRecognizer error: ${e.message}", true)
-            resumeWakeWordListeningOnMain()
+            restartWakeWordLoopOnMain()
         }
     }
 
     /**
-     * Step 5-7 of the Jarvis Conversation Loop:
-     * - Send the recognized command to Gemini/Groq (or handle explicit Note:/Email commands).
-     * - Speak the AI's response via TTS.
-     * - Automatically resume listening for the wake word in the background.
+     * Routes the recognized voice command to Groq ("openai/gpt-oss-120b"), speaks the response
+     * aloud via VoiceEngine (ElevenLabs / Android TTS), and restarts the ONNX wake-word loop.
      */
-    private fun processSpokenCommandAndReply(spokenCommand: String) {
-        updateExternalStatus("Routing command to ${securePrefs.llmProvider.name}: \"$spokenCommand\"", false)
+    private fun routeCommandToGroqAndSpeak(spokenCommand: String) {
+        updateExternalStatus("Sending to Groq: \"$spokenCommand\"", false)
         updateForegroundNotification("Thinking...")
 
         serviceScope.launch {
@@ -592,7 +575,7 @@ class WakeWordService : Service() {
                                     "ASSISTANT",
                                     "${AiClient.AI_BRAIN_UNREACHABLE_MESSAGE}\n[Diagnostic: $diag]"
                                 )
-                                updateExternalStatus("LLM error: $diag", true)
+                                updateExternalStatus("Groq error: $diag", true)
                                 AiClient.AI_BRAIN_UNREACHABLE_MESSAGE
                             }
                         )
@@ -610,61 +593,34 @@ class WakeWordService : Service() {
                         fallbackSpeechRate = speechRate,
                         onComplete = {
                             mainHandler.postDelayed({
-                                resumeWakeWordListeningOnMain()
-                            }, 220L)
+                                restartWakeWordLoopOnMain()
+                            }, 250L)
                         }
-                    ) ?: resumeWakeWordListeningOnMain()
+                    ) ?: restartWakeWordLoopOnMain()
                 }
             } catch (e: Exception) {
+                Log.e(TAG, "Jarvis conversation loop error: ${e.message}", e)
                 mainHandler.post {
                     updateExternalStatus("Jarvis loop error: ${e.message}", true)
-                    resumeWakeWordListeningOnMain()
+                    restartWakeWordLoopOnMain()
                 }
             }
         }
     }
 
-    private fun resumeWakeWordListeningOnMain() {
+    private fun restartWakeWordLoopOnMain() {
         isInConversationLoop.set(false)
-        if (isStopping || !securePrefs.isWakeWordEnabled || isTemporarilyPausedForUiMic) {
+        if (isStopping) return
+
+        if (!securePrefs.isWakeWordEnabled) {
+            stopDetectionCoroutine()
+            stopForegroundSafely()
+            stopSelf()
             return
         }
 
-        val wakeName = activeWakeWordLabel()
-        val manager = porcupineManager
-        if (manager == null) {
-            initializePorcupineEngine()
-            return
-        }
-
-        try {
-            manager.start()
-            updateExternalStatus("Active — Listening for \"$wakeName\" in background.", false)
-            updateForegroundNotification("Listening for \"$wakeName\"")
-        } catch (e: PorcupineException) {
-            updateExternalStatus("Porcupine resume error: ${e.message}", true)
-            updateForegroundNotification("Wake word paused — check Settings")
-        }
-    }
-
-    private fun pausePorcupineInternal() {
-        try {
-            porcupineManager?.stop()
-        } catch (_: PorcupineException) {
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun releasePorcupineInternal() {
-        try {
-            porcupineManager?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            porcupineManager?.delete()
-        } catch (_: Exception) {
-        } finally {
-            porcupineManager = null
+        if (!isTemporarilyPausedForUiMic) {
+            startOnnxDetectionLoop()
         }
     }
 
@@ -694,6 +650,7 @@ class WakeWordService : Service() {
             }
             true
         } catch (e: Exception) {
+            Log.e(TAG, "Foreground service start blocked by OS", e)
             updateExternalStatus(
                 "Foreground microphone service blocked by OS: ${e.javaClass.simpleName}: ${e.message}",
                 true
@@ -712,8 +669,6 @@ class WakeWordService : Service() {
     }
 
     private fun buildPersistentNotification(statusLine: String): Notification {
-        val wakeName = activeWakeWordLabel()
-
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -736,7 +691,7 @@ class WakeWordService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Xestlab Wake Word ($wakeName)")
+            .setContentTitle("Xestlab Assistant")
             .setContentText(statusLine)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -754,7 +709,7 @@ class WakeWordService : Service() {
             "Background Wake Word Service",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Persistent background wake word listener (Picovoice Porcupine)"
+            description = "Persistent openWakeWord ONNX listener ('Hey Jarvis')"
             setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
@@ -772,7 +727,9 @@ class WakeWordService : Service() {
         _isRunningFlow.value = false
         mainHandler.removeCallbacksAndMessages(null)
         destroySpeechRecognizerOnMain()
-        releasePorcupineInternal()
+        stopDetectionCoroutine()
+        openWakeWordPipeline?.close()
+        openWakeWordPipeline = null
         try {
             toneGenerator?.release()
             toneGenerator = null

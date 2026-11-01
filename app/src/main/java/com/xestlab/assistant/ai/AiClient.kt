@@ -1,5 +1,6 @@
 package com.xestlab.assistant.ai
 
+import android.util.Log
 import com.xestlab.assistant.data.LlmProvider
 import com.xestlab.assistant.data.SecurePreferences
 import com.xestlab.assistant.data.UserPreferencesState
@@ -44,6 +45,8 @@ data class EmailAnalysisResult(
 )
 
 object AiClient {
+
+    private const val TAG = "AiClient"
 
     const val GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
     const val GROQ_MODEL = "openai/gpt-oss-120b"
@@ -351,6 +354,7 @@ object AiClient {
                 val bodyStr = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     val detail = extractReadableApiError(bodyStr)
+                    Log.e(TAG, "Groq HTTP ${response.code} ($GROQ_MODEL): $detail")
                     return Result.failure(
                         ApiHttpException(
                             provider = "GROQ/$GROQ_MODEL",
@@ -384,6 +388,7 @@ object AiClient {
                 }
             }
         } catch (e: Exception) {
+            Log.e(TAG, "Groq request failed: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -512,9 +517,10 @@ object AiClient {
         }
     }
 
-    private fun sanitizeForSpeech(raw: String): String {
+    fun sanitizeForSpeech(raw: String): String {
         return raw
             .replace("```", " ")
+            .replace(Regex("\\[([^]]+)]\\([^)]+\\)"), "$1")
             .replace("**", "")
             .replace("*", "")
             .replace("#", "")

@@ -85,11 +85,13 @@ fun SettingsScreen(
     val isThinking by viewModel.isThinking.collectAsState()
 
     val wakeWordEnabledState by viewModel.wakeWordEnabledState.collectAsState()
-    val savedWakeWordName by viewModel.wakeWordNameState.collectAsState()
-    val savedPicovoiceSummary by viewModel.savedPicovoiceSummary.collectAsState()
-    val hasImportedPpn by viewModel.hasImportedPpn.collectAsState()
     val wakeWordStatusText by viewModel.wakeWordStatusText.collectAsState()
     val wakeWordStatusIsError by viewModel.wakeWordStatusIsError.collectAsState()
+
+    val savedElevenLabsSummary by viewModel.savedElevenLabsSummary.collectAsState()
+    val voiceStatusText by viewModel.voiceStatusText.collectAsState()
+    val voiceStatusIsError by viewModel.voiceStatusIsError.collectAsState()
+    val isSpeaking by viewModel.isSpeaking.collectAsState()
 
     LaunchedEffect(Unit) {
         viewModel.refreshSavedKeySummaries()
@@ -109,10 +111,8 @@ fun SettingsScreen(
 
     var showMemoryDialog by remember { mutableStateOf(false) }
 
-    // Custom Wake Word & Picovoice Encrypted Credentials
+    // openWakeWord ONNX ("Hey Jarvis") Toggle State
     var wakeWordEnabled by remember(wakeWordEnabledState) { mutableStateOf(wakeWordEnabledState) }
-    var wakeWordNameInput by remember(savedWakeWordName) { mutableStateOf(savedWakeWordName) }
-    var picovoiceKeyInput by remember { mutableStateOf("") }
 
     // Primary Groq Encrypted Credentials (model hardcoded to "openai/gpt-oss-120b" in AiClient)
     var selectedProvider by remember { mutableStateOf(LlmProvider.GROQ) }
@@ -122,7 +122,7 @@ fun SettingsScreen(
 
     // ElevenLabs Encrypted Voice Key
     var elevenLabsKeyInput by remember { mutableStateOf("") }
-    var hasElevenSaved by remember { mutableStateOf(viewModel.securePrefs.hasElevenLabsKey()) }
+    val hasElevenSaved = savedElevenLabsSummary != "None saved"
 
     // Smart IMAP Encrypted Credentials
     var imapEnabled by remember { mutableStateOf(viewModel.securePrefs.isImapEnabled) }
@@ -144,34 +144,14 @@ fun SettingsScreen(
             ) == PackageManager.PERMISSION_GRANTED
         if (micGranted) {
             wakeWordEnabled = true
-            viewModel.saveWakeWordSettings(
-                enabled = true,
-                wakeWordNameInput = wakeWordNameInput,
-                picovoiceKeyInput = picovoiceKeyInput
-            )
-            picovoiceKeyInput = ""
+            viewModel.setWakeWordEnabled(true)
         } else {
             wakeWordEnabled = false
             Toast.makeText(
                 context,
-                "Microphone permission is required for background wake word listening.",
+                "RECORD_AUDIO permission is required for 'Hey Jarvis' wake word listening.",
                 Toast.LENGTH_LONG
             ).show()
-        }
-    }
-
-    val ppnImportLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            try {
-                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                if (bytes != null && bytes.isNotEmpty()) {
-                    viewModel.importCustomWakeWordPpn(bytes)
-                }
-            } catch (e: Exception) {
-                viewModel.setStatusBanner("Failed to import .ppn file: ${e.message}")
-            }
         }
     }
 
@@ -230,17 +210,17 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.headlineMedium
             )
             Text(
-                text = "All API keys, Picovoice keys, and IMAP passwords are encrypted with AES-256 EncryptedSharedPreferences.",
+                text = "All API keys and IMAP passwords are encrypted with AES-256 EncryptedSharedPreferences.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextMutedDark
             )
         }
 
-        // 0. Custom Wake Word (Picovoice Porcupine + Jarvis Conversation Loop)
+        // 0. openWakeWord ONNX ("Hey Jarvis") Background Listener
         item {
-            SettingsCard(title = "CUSTOM WAKE WORD (PICOVOICE PORCUPINE - JARVIS LOOP)") {
+            SettingsCard(title = "WAKE WORD — 'HEY JARVIS' (OPENWAKEWORD ONNX PIPELINE)") {
                 SettingsSwitchRow(
-                    label = "Enable Background Wake Word (Auto-Start on Boot)",
+                    label = "Listen for 'Hey Jarvis' in Background",
                     checked = wakeWordEnabled,
                     onCheckedChange = { wantEnabled ->
                         if (wantEnabled) {
@@ -248,14 +228,18 @@ fun SettingsScreen(
                                 context,
                                 Manifest.permission.RECORD_AUDIO
                             ) == PackageManager.PERMISSION_GRANTED
-                            if (hasMic) {
+                            val hasNotif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.POST_NOTIFICATIONS
+                                ) == PackageManager.PERMISSION_GRANTED
+                            } else {
+                                true
+                            }
+
+                            if (hasMic && hasNotif) {
                                 wakeWordEnabled = true
-                                viewModel.setWakeWordEnabled(
-                                    enabled = true,
-                                    wakeWordNameDraft = wakeWordNameInput,
-                                    picovoiceKeyDraft = picovoiceKeyInput
-                                )
-                                picovoiceKeyInput = ""
+                                viewModel.setWakeWordEnabled(true)
                             } else {
                                 val perms = buildList {
                                     add(Manifest.permission.RECORD_AUDIO)
@@ -267,138 +251,40 @@ fun SettingsScreen(
                             }
                         } else {
                             wakeWordEnabled = false
-                            viewModel.setWakeWordEnabled(
-                                enabled = false,
-                                wakeWordNameDraft = wakeWordNameInput,
-                                picovoiceKeyDraft = picovoiceKeyInput
-                            )
+                            viewModel.setWakeWordEnabled(false)
                         }
                     }
                 )
 
-                SettingsTextField(
-                    value = wakeWordNameInput,
-                    onValueChange = { wakeWordNameInput = it },
-                    label = "Wake Word Name (e.g., Hades, Jarvis, Cynthia)"
-                )
-
-                SecretKeyTextField(
-                    value = picovoiceKeyInput,
-                    onValueChange = { picovoiceKeyInput = it },
-                    label = if (savedPicovoiceSummary != "None saved") {
-                        "Picovoice Access Key (Saved: $savedPicovoiceSummary)"
-                    } else {
-                        "Picovoice Access Key"
-                    }
-                )
-
                 Text(
-                    text = "SecurePrefs Picovoice Key: $savedPicovoiceSummary",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (savedPicovoiceSummary != "None saved") TealAccent else WarningRed
-                )
-
-                Text(
-                    text = if (hasImportedPpn) {
-                        "Keyword Model: Custom imported .ppn active (overrides assets/custom_wake_word.ppn)"
-                    } else {
-                        "Keyword Model: Bundled assets/custom_wake_word.ppn"
-                    },
+                    text = "100% On-Device 3-Model ONNX Pipeline: melspectrogram.onnx -> embedding_model.onnx -> hey_jarvis_v0.1.onnx (triggers when score > 0.5).",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextMutedDark
                 )
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            val hasMic = ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.RECORD_AUDIO
-                            ) == PackageManager.PERMISSION_GRANTED
-                            if (!hasMic) {
-                                Toast.makeText(
-                                    context,
-                                    "Grant Microphone permission first.",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                                val perms = buildList {
-                                    add(Manifest.permission.RECORD_AUDIO)
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                        add(Manifest.permission.POST_NOTIFICATIONS)
-                                    }
+                OutlinedButton(
+                    onClick = {
+                        val hasMic = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!hasMic) {
+                            val perms = buildList {
+                                add(Manifest.permission.RECORD_AUDIO)
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    add(Manifest.permission.POST_NOTIFICATIONS)
                                 }
-                                wakePermissionLauncher.launch(perms.toTypedArray())
-                            } else {
-                                viewModel.testJarvisLoopFromSettings(
-                                    wakeWordNameDraft = wakeWordNameInput,
-                                    picovoiceKeyDraft = picovoiceKeyInput
-                                )
-                                picovoiceKeyInput = ""
                             }
-                        },
-                        shape = CardShape8,
-                        border = BorderStroke(1.dp, TealAccent),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Test Jarvis Loop", color = TealAccent)
-                    }
-
-                    Button(
-                        onClick = {
-                            val hasMic = ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.RECORD_AUDIO
-                            ) == PackageManager.PERMISSION_GRANTED
-                            if (wakeWordEnabled && !hasMic) {
-                                val perms = buildList {
-                                    add(Manifest.permission.RECORD_AUDIO)
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                        add(Manifest.permission.POST_NOTIFICATIONS)
-                                    }
-                                }
-                                wakePermissionLauncher.launch(perms.toTypedArray())
-                            } else {
-                                viewModel.saveWakeWordSettings(
-                                    enabled = wakeWordEnabled,
-                                    wakeWordNameInput = wakeWordNameInput,
-                                    picovoiceKeyInput = picovoiceKeyInput
-                                )
-                                picovoiceKeyInput = ""
-                            }
-                        },
-                        shape = CardShape8,
-                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Save Wake Word", color = BgDark, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = { ppnImportLauncher.launch(arrayOf("*/*")) },
-                        shape = CardShape8,
-                        border = BorderStroke(1.dp, BorderDark),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Import Custom .ppn File", color = TextPrimaryDark)
-                    }
-                    if (hasImportedPpn) {
-                        OutlinedButton(
-                            onClick = { viewModel.clearImportedWakeWordPpn() },
-                            shape = CardShape8,
-                            border = BorderStroke(1.dp, WarningRed),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Use Asset .ppn", color = WarningRed)
+                            wakePermissionLauncher.launch(perms.toTypedArray())
+                        } else {
+                            viewModel.testJarvisLoopFromSettings()
                         }
-                    }
+                    },
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, TealAccent),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Test 'Hey Jarvis' Conversation Loop", color = TealAccent)
                 }
 
                 Surface(
@@ -555,6 +441,10 @@ fun SettingsScreen(
                                 provider = LlmProvider.GROQ,
                                 groqKeyInput = groqKeyInput
                             )
+                            if (elevenLabsKeyInput.isNotBlank()) {
+                                viewModel.saveElevenLabsKey(elevenLabsKeyInput)
+                                elevenLabsKeyInput = ""
+                            }
                             groqKeyInput = ""
                             aiEnabled = viewModel.securePrefs.isAiEnabled
                         },
@@ -610,9 +500,9 @@ fun SettingsScreen(
             SettingsCard(title = "VOICE ENGINE (ELEVENLABS + 0.9X NATURAL FALLBACK)") {
                 Text(
                     text = if (hasElevenSaved) {
-                        "ElevenLabs active (Voice ID: 21m00Tcm4TlvDq8ikWAM). Falls back to Android TTS (0.9x) if offline."
+                        "ElevenLabs active (Voice ID: 21m00Tcm4TlvDq8ikWAM). Automatically falls back to Android TTS (0.9x) if offline or on API error."
                     } else {
-                        "Using Android TTS natural fallback (Speech rate 0.9x, Pitch 1.0). Add an ElevenLabs key below for studio neural voice."
+                        "Using Android TTS natural fallback (Speech rate 0.9x, Pitch 1.0). Save your ElevenLabs API key below to route all speech through ElevenLabs."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextMutedDark
@@ -622,10 +512,16 @@ fun SettingsScreen(
                     value = elevenLabsKeyInput,
                     onValueChange = { elevenLabsKeyInput = it },
                     label = if (hasElevenSaved) {
-                        "ElevenLabs API Key (Encrypted & Saved - enter new to replace)"
+                        "ElevenLabs API Key (Saved: $savedElevenLabsSummary)"
                     } else {
-                        "ElevenLabs API Key (Optional)"
+                        "ElevenLabs API Key (sk_...)"
                     }
+                )
+
+                Text(
+                    text = "SecurePrefs ElevenLabs Key: $savedElevenLabsSummary",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (hasElevenSaved) TealAccent else WarningRed
                 )
 
                 Row(
@@ -634,9 +530,15 @@ fun SettingsScreen(
                 ) {
                     OutlinedButton(
                         onClick = {
+                            if (elevenLabsKeyInput.isBlank() && !viewModel.securePrefs.hasElevenLabsKey()) {
+                                Toast.makeText(
+                                    context,
+                                    "No ElevenLabs key saved — testing fallback Android TTS.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
                             viewModel.testVoicePlayback(elevenLabsKeyInput)
                             if (elevenLabsKeyInput.isNotBlank()) {
-                                hasElevenSaved = true
                                 elevenLabsKeyInput = ""
                             }
                         },
@@ -644,15 +546,29 @@ fun SettingsScreen(
                         border = BorderStroke(1.dp, TealAccent),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Test Voice", color = TealAccent)
+                        Text(
+                            text = if (isSpeaking) "Speaking..." else "Test Voice",
+                            color = TealAccent
+                        )
                     }
 
                     Button(
                         onClick = {
                             if (elevenLabsKeyInput.isNotBlank()) {
                                 viewModel.saveElevenLabsKey(elevenLabsKeyInput)
-                                hasElevenSaved = true
                                 elevenLabsKeyInput = ""
+                            } else if (viewModel.securePrefs.hasElevenLabsKey()) {
+                                Toast.makeText(
+                                    context,
+                                    "ElevenLabs key already saved ($savedElevenLabsSummary).",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } else {
+                                Toast.makeText(
+                                    context,
+                                    "Paste your ElevenLabs API key first.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             }
                         },
                         shape = CardShape8,
@@ -667,7 +583,6 @@ fun SettingsScreen(
                     OutlinedButton(
                         onClick = {
                             viewModel.saveElevenLabsKey("")
-                            hasElevenSaved = false
                         },
                         shape = CardShape8,
                         border = BorderStroke(1.dp, BorderDark),
@@ -675,6 +590,42 @@ fun SettingsScreen(
                     ) {
                         Text("Clear ElevenLabs Key (Use Android TTS 0.9x)", color = WarningRed)
                     }
+                }
+
+                // Live diagnostic TextView showing ElevenLabs HTTP status / MediaPlayer playback or fallback error
+                Surface(
+                    color = SurfaceSubtleDark,
+                    shape = CardShape8,
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (voiceStatusIsError) WarningRed else BorderDark
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val errorColorArgb = WarningRed.toArgb()
+                    val okColorArgb = TealAccent.toArgb()
+                    AndroidView(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        factory = { ctx ->
+                            TextView(ctx).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT
+                                )
+                                typeface = Typeface.MONOSPACE
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                                setTextIsSelectable(true)
+                            }
+                        },
+                        update = { textView ->
+                            textView.text = voiceStatusText
+                            textView.setTextColor(
+                                if (voiceStatusIsError) errorColorArgb else okColorArgb
+                            )
+                        }
+                    )
                 }
 
                 Text(
@@ -825,6 +776,10 @@ fun SettingsScreen(
 
                 Button(
                     onClick = {
+                        if (elevenLabsKeyInput.isNotBlank()) {
+                            viewModel.saveElevenLabsKey(elevenLabsKeyInput)
+                            elevenLabsKeyInput = ""
+                        }
                         viewModel.updateProfilePreferences(
                             userName = nameField,
                             wakeUpTime = wakeField,

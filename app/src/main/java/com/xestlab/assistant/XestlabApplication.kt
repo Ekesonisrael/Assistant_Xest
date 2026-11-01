@@ -67,7 +67,7 @@ class XestlabApplication : Application() {
             "Background Wake Word Service",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Persistent background wake word listener (Picovoice Porcupine)"
+            description = "Persistent openWakeWord ONNX listener ('Hey Jarvis')"
             setShowBadge(false)
         }
 

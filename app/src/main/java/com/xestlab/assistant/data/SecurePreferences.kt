@@ -74,8 +74,12 @@ class SecurePreferences(context: Context) {
                 .trim()
                 .removeSurrounding("\"")
                 .removeSurrounding("'")
+                .removeSurrounding("<", ">")
+                .removePrefix("xi-api-key:")
+                .removePrefix("xi-api-key")
                 .removePrefix("Bearer ")
                 .removePrefix("bearer ")
+                .trim()
                 .replace(Regex("\\s+"), "")
         }
     }
@@ -137,6 +141,16 @@ class SecurePreferences(context: Context) {
         }
 
     fun hasElevenLabsKey(): Boolean = elevenLabsApiKey.isNotBlank()
+
+    fun maskedElevenLabsKeyPreview(): String {
+        val key = elevenLabsApiKey
+        if (key.isBlank()) return "None saved"
+        return if (key.length <= 8) {
+            "Saved (${key.length} chars)"
+        } else {
+            "${key.take(4)}...${key.takeLast(4)} (${key.length} chars)"
+        }
+    }
 
     var isImapEnabled: Boolean
         get() = prefs.getBoolean("imap_enabled", false)

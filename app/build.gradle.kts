@@ -67,7 +67,7 @@ android {
     }
 
     androidResources {
-        noCompress += "ppn"
+        noCompress += "onnx"
     }
 
     packaging {
@@ -103,8 +103,8 @@ dependencies {
     // OkHttp for resilient Gemini, Groq, and ElevenLabs HTTP requests
     implementation(libs.okhttp)
 
-    // Picovoice Porcupine SDK for custom wake word (.ppn) detection
-    implementation(libs.picovoice.porcupine)
+    // ONNX Runtime Android for openWakeWord 3-model pipeline (melspectrogram -> embedding -> hey_jarvis_v0.1)
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.1")
 
     // Room Persistence
     implementation(libs.androidx.room.runtime)

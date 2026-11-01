@@ -118,7 +118,7 @@ class VoiceReminderService : Service() {
                     PowerManager.PARTIAL_WAKE_LOCK,
                     "xestlab:VoiceBriefingWakeLock"
                 ).apply {
-                    acquire(60_000L)
+                    acquire(180_000L)
                 }
             }
         } catch (_: Exception) {
@@ -139,6 +139,10 @@ class VoiceReminderService : Service() {
     private fun stopPlaybackAndFinish() {
         try {
             voiceEngine.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
         } catch (_: Exception) {
         }
         releaseWakeLock()

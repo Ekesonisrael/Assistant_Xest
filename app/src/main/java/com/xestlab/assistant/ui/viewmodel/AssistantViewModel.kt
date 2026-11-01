@@ -37,8 +37,6 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -106,23 +104,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val _llmTestIsError = MutableStateFlow(false)
     val llmTestIsError: StateFlow<Boolean> = _llmTestIsError.asStateFlow()
 
-    // Wake Word & Picovoice Porcupine Reactive State
+    // openWakeWord ONNX ("Hey Jarvis") Reactive State
     private val _wakeWordEnabledState = MutableStateFlow(securePrefs.isWakeWordEnabled)
     val wakeWordEnabledState: StateFlow<Boolean> = _wakeWordEnabledState.asStateFlow()
 
-    private val _wakeWordNameState = MutableStateFlow(securePrefs.wakeWordName)
-    val wakeWordNameState: StateFlow<String> = _wakeWordNameState.asStateFlow()
-
-    private val _savedPicovoiceSummary = MutableStateFlow(securePrefs.maskedPicovoiceKeyPreview())
-    val savedPicovoiceSummary: StateFlow<String> = _savedPicovoiceSummary.asStateFlow()
-
-    private val _hasImportedPpn = MutableStateFlow(
-        File(appContext.filesDir, WakeWordService.IMPORTED_PPN_FILENAME).exists()
-    )
-    val hasImportedPpn: StateFlow<Boolean> = _hasImportedPpn.asStateFlow()
-
     val wakeWordStatusText: StateFlow<String> = WakeWordService.statusMessageFlow
     val wakeWordStatusIsError: StateFlow<Boolean> = WakeWordService.statusIsErrorFlow
+
+    private val _savedElevenLabsSummary = MutableStateFlow(securePrefs.maskedElevenLabsKeyPreview())
+    val savedElevenLabsSummary: StateFlow<String> = _savedElevenLabsSummary.asStateFlow()
+
+    val voiceStatusText: StateFlow<String> = VoiceEngine.statusMessageFlow
+    val voiceStatusIsError: StateFlow<Boolean> = VoiceEngine.statusIsErrorFlow
 
     private val _weeklySummary = MutableStateFlow(
         WeeklySummaryData(
@@ -741,11 +734,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun refreshSavedKeySummaries() {
         _savedGeminiSummary.value = securePrefs.maskedKeyPreview(LlmProvider.GEMINI)
         _savedGroqSummary.value = securePrefs.maskedKeyPreview(LlmProvider.GROQ)
+        _savedElevenLabsSummary.value = securePrefs.maskedElevenLabsKeyPreview()
         _wakeWordEnabledState.value = securePrefs.isWakeWordEnabled
-        _wakeWordNameState.value = securePrefs.wakeWordName
-        _savedPicovoiceSummary.value = securePrefs.maskedPicovoiceKeyPreview()
-        _hasImportedPpn.value =
-            File(appContext.filesDir, WakeWordService.IMPORTED_PPN_FILENAME).exists()
     }
 
     fun setDiagnosticError(message: String) {
@@ -839,20 +829,33 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun saveElevenLabsKey(apiKeyInput: String) {
-        securePrefs.elevenLabsApiKey = apiKeyInput.trim()
-        _statusBanner.value = if (apiKeyInput.isBlank()) {
-            "Cleared ElevenLabs key. Using natural Android TTS (0.9x)."
+        val cleaned = SecurePreferences.sanitizeApiKey(apiKeyInput)
+        securePrefs.elevenLabsApiKey = cleaned
+        refreshSavedKeySummaries()
+        if (cleaned.isEmpty()) {
+            _statusBanner.value = "Cleared ElevenLabs key. Using natural Android TTS (0.9x)."
+            VoiceEngine.updateExternalDiagnostic(
+                "Cleared ElevenLabs key — using Android TTS fallback (0.9x).",
+                isError = false
+            )
         } else {
-            "Encrypted & saved ElevenLabs voice key."
+            val preview = securePrefs.maskedElevenLabsKeyPreview()
+            _statusBanner.value = "Encrypted & saved ElevenLabs voice key ($preview)."
+            VoiceEngine.updateExternalDiagnostic(
+                "Saved ElevenLabs key in EncryptedSharedPreferences ($preview). Tap 'Test Voice' to verify.",
+                isError = false
+            )
         }
     }
 
     fun testVoicePlayback(elevenLabsDraftKey: String) {
-        if (elevenLabsDraftKey.isNotBlank()) {
-            securePrefs.elevenLabsApiKey = elevenLabsDraftKey.trim()
+        val draftClean = SecurePreferences.sanitizeApiKey(elevenLabsDraftKey)
+        if (draftClean.isNotEmpty()) {
+            securePrefs.elevenLabsApiKey = draftClean
+            refreshSavedKeySummaries()
         }
         val displayName = prefsState.value.userName.ifBlank { "King Israel" }
-        speakText("Good morning $displayName, how are you doing? Xestlab Assistant voice is active and ready.")
+        speakText("Good morning $displayName, how are you doing? Xestlab Assistant neural voice is active and ready.")
     }
 
     // --- Smart IMAP Email Checker ---
@@ -929,98 +932,24 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    // --- Custom Wake Word (Picovoice Porcupine) Controls ---
+    // --- openWakeWord ONNX ("Hey Jarvis") Controls ---
 
-    fun saveWakeWordSettings(
-        enabled: Boolean,
-        wakeWordNameInput: String,
-        picovoiceKeyInput: String
-    ) {
-        securePrefs.wakeWordName = wakeWordNameInput.trim()
-        if (picovoiceKeyInput.isNotBlank()) {
-            securePrefs.picovoiceAccessKey = picovoiceKeyInput
-        }
+    fun setWakeWordEnabled(enabled: Boolean) {
+        securePrefs.wakeWordName = "Jarvis"
         securePrefs.isWakeWordEnabled = enabled
-        refreshSavedKeySummaries()
+        _wakeWordEnabledState.value = enabled
 
         if (enabled) {
             WakeWordService.start(appContext)
-            val label = securePrefs.wakeWordName.ifBlank { "Assistant" }
-            _statusBanner.value = "Saved wake word \"$label\" & started Foreground WakeWordService."
+            _statusBanner.value = "Listening for 'Hey Jarvis'... (openWakeWord ONNX active)"
         } else {
             WakeWordService.stop(appContext)
-            _statusBanner.value = "Saved wake word settings (background listener disabled)."
+            _statusBanner.value = "'Hey Jarvis' background wake word listener stopped."
         }
     }
 
-    fun setWakeWordEnabled(
-        enabled: Boolean,
-        wakeWordNameDraft: String,
-        picovoiceKeyDraft: String
-    ) {
-        if (wakeWordNameDraft.isNotBlank()) {
-            securePrefs.wakeWordName = wakeWordNameDraft.trim()
-        }
-        if (picovoiceKeyDraft.isNotBlank()) {
-            securePrefs.picovoiceAccessKey = picovoiceKeyDraft
-        }
-        securePrefs.isWakeWordEnabled = enabled
-        refreshSavedKeySummaries()
-
-        if (enabled) {
-            WakeWordService.start(appContext)
-        } else {
-            WakeWordService.stop(appContext)
-        }
-    }
-
-    fun importCustomWakeWordPpn(bytes: ByteArray) {
-        if (bytes.isEmpty()) return
-        try {
-            val outFile = File(appContext.filesDir, WakeWordService.IMPORTED_PPN_FILENAME)
-            FileOutputStream(outFile).use { it.write(bytes) }
-            _hasImportedPpn.value = true
-            if (securePrefs.isWakeWordEnabled) {
-                WakeWordService.start(appContext)
-            } else {
-                WakeWordService.updateExternalStatus(
-                    "Imported custom .ppn (${bytes.size} bytes). Toggle ON or tap Save Wake Word to start.",
-                    false
-                )
-            }
-            _statusBanner.value = "Imported custom .ppn wake word model (${bytes.size} bytes)."
-        } catch (e: Exception) {
-            WakeWordService.updateExternalStatus("Failed to save .ppn file: ${e.message}", true)
-        }
-    }
-
-    fun clearImportedWakeWordPpn() {
-        val outFile = File(appContext.filesDir, WakeWordService.IMPORTED_PPN_FILENAME)
-        if (outFile.exists()) {
-            outFile.delete()
-        }
-        _hasImportedPpn.value = false
-        if (securePrefs.isWakeWordEnabled) {
-            WakeWordService.start(appContext)
-        } else {
-            WakeWordService.updateExternalStatus(
-                "Reverted to bundled assets/${WakeWordService.ASSET_WAKE_WORD_PATH}.",
-                false
-            )
-        }
-    }
-
-    fun testJarvisLoopFromSettings(
-        wakeWordNameDraft: String,
-        picovoiceKeyDraft: String
-    ) {
-        if (wakeWordNameDraft.isNotBlank()) {
-            securePrefs.wakeWordName = wakeWordNameDraft.trim()
-        }
-        if (picovoiceKeyDraft.isNotBlank()) {
-            securePrefs.picovoiceAccessKey = picovoiceKeyDraft
-        }
-        refreshSavedKeySummaries()
+    fun testJarvisLoopFromSettings() {
+        securePrefs.wakeWordName = "Jarvis"
         WakeWordService.triggerJarvisLoopTest(appContext)
     }
 }
