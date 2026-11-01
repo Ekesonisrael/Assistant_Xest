@@ -1,6 +1,7 @@
 package com.xestlab.assistant.service
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -17,6 +18,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -43,22 +45,28 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Foreground Service running the 3-model openWakeWord ONNX Runtime pipeline
- * (`melspectrogram.onnx` -> `embedding_model.onnx` -> `hey_jarvis_v0.1.onnx`) in a background
- * Coroutine and executing the full Jarvis conversation loop when `score > 0.5`:
+ * Resilient Foreground Service running the 3-model openWakeWord ONNX Runtime pipeline
+ * (`melspectrogram.onnx` -> `embedding_model.onnx` -> `hey_jarvis_v0.1.onnx`) in an
+ * infinite `while (isListening)` Coroutine loop:
  *
- * 1. Stop the AudioRecord stream.
- * 2. Play an activation chime.
- * 3. Speak "Yes? What do you need?" via VoiceEngine (ElevenLabs or Android TTS fallback).
- * 4. Start SpeechRecognizer to capture the user's spoken command.
- * 5. Send the command to Groq ("openai/gpt-oss-120b").
- * 6. Speak Groq's reply via VoiceEngine.
- * 7. Restart the WakeWordService ONNX listening loop ("Listening for 'Hey Jarvis'...").
+ * - Dynamically sizes `AudioRecord` via `AudioRecord.getMinBufferSize()`.
+ * - Never breaks on empty/null reads; catches & logs any audio/ONNX exception and immediately
+ *   restarts the recording loop so wake-word listening never times out or drops out.
+ * - Holds a `PARTIAL_WAKE_LOCK` while active so CPU inference is never throttled when the screen dims.
+ * - Executes the full Jarvis conversation loop when `score > 0.5`:
+ *   1. Stop the AudioRecord stream.
+ *   2. Play activation chime.
+ *   3. Speak "Yes? What do you need?" via VoiceEngine (ElevenLabs or Android TTS fallback).
+ *   4. Start SpeechRecognizer to capture command.
+ *   5. Route to Groq ("openai/gpt-oss-120b") or local briefing/task intents.
+ *   6. Speak response via VoiceEngine.
+ *   7. Immediately restart the infinite `while (isListening)` wake-word loop.
  */
 class WakeWordService : Service() {
 
@@ -188,17 +196,23 @@ class WakeWordService : Service() {
 
     private var openWakeWordPipeline: OpenWakeWordPipeline? = null
     private var detectionLoopJob: Job? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private var voiceEngine: VoiceEngine? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var toneGenerator: ToneGenerator? = null
 
+    private val isListeningState = AtomicBoolean(false)
     private val isInConversationLoop = AtomicBoolean(false)
-    private var isTemporarilyPausedForUiMic = false
-    private var isStopping = false
+    private val isTemporarilyPausedForUiMic = AtomicBoolean(false)
+    private val isStopping = AtomicBoolean(false)
+
+    val isListening: Boolean
+        get() = isListeningState.get()
 
     private val recognizerWatchdogRunnable = Runnable {
         if (isInConversationLoop.get()) {
+            Log.w(TAG, "SpeechRecognizer watchdog timeout — resuming 'Hey Jarvis' wake word loop")
             destroySpeechRecognizerOnMain()
             restartWakeWordLoopOnMain()
         }
@@ -224,22 +238,25 @@ class WakeWordService : Service() {
         when (intent?.action) {
             ACTION_STOP_SERVICE -> {
                 securePrefs.isWakeWordEnabled = false
+                isListeningState.set(false)
                 updateExternalStatus("Wake word disabled from notification.", false)
                 stopDetectionCoroutine()
+                releaseCpuWakeLock()
                 stopForegroundSafely()
                 stopSelf()
                 return START_NOT_STICKY
             }
 
             ACTION_TEMP_PAUSE -> {
-                isTemporarilyPausedForUiMic = true
+                isTemporarilyPausedForUiMic.set(true)
+                isListeningState.set(false)
                 stopDetectionCoroutine()
                 updateForegroundNotification("Paused briefly while in-app mic is active")
                 return START_STICKY
             }
 
             ACTION_TEMP_RESUME -> {
-                isTemporarilyPausedForUiMic = false
+                isTemporarilyPausedForUiMic.set(false)
                 if (!isInConversationLoop.get() && securePrefs.isWakeWordEnabled) {
                     startOnnxDetectionLoop()
                 }
@@ -251,7 +268,9 @@ class WakeWordService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                acquireCpuWakeLock()
                 _isRunningFlow.value = true
+                isListeningState.set(false)
                 stopDetectionCoroutine()
                 mainHandler.post {
                     onWakeWordTriggered(score = 1.0f)
@@ -274,8 +293,9 @@ class WakeWordService : Service() {
             return START_NOT_STICKY
         }
 
+        acquireCpuWakeLock()
         _isRunningFlow.value = true
-        isTemporarilyPausedForUiMic = false
+        isTemporarilyPausedForUiMic.set(false)
 
         if (!isInConversationLoop.get()) {
             startOnnxDetectionLoop()
@@ -285,15 +305,18 @@ class WakeWordService : Service() {
     }
 
     /**
-     * Starts the background Coroutine running the 3-model openWakeWord ONNX pipeline:
-     * AudioRecord (16kHz PCM) -> melspectrogram.onnx -> embedding_model.onnx -> hey_jarvis_v0.1.onnx
+     * Starts an infinite `while (isListening)` Coroutine running the 3-model openWakeWord ONNX
+     * pipeline (`AudioRecord` -> `melspectrogram.onnx` -> `embedding_model.onnx` -> `hey_jarvis_v0.1.onnx`).
+     * Never breaks on transient empty reads or recoverable audio/ONNX exceptions.
      */
     private fun startOnnxDetectionLoop() {
-        if (isStopping || isTemporarilyPausedForUiMic || isInConversationLoop.get()) {
+        if (isStopping.get() || isTemporarilyPausedForUiMic.get() || isInConversationLoop.get()) {
             return
         }
 
         stopDetectionCoroutine()
+        isListeningState.set(true)
+        acquireCpuWakeLock()
 
         val pipeline = openWakeWordPipeline ?: OpenWakeWordPipeline(applicationContext).also {
             openWakeWordPipeline = it
@@ -301,7 +324,7 @@ class WakeWordService : Service() {
 
         updateForegroundNotification(ACTIVE_NOTIFICATION_TEXT)
         updateExternalStatus(
-            "$ACTIVE_NOTIFICATION_TEXT (ONNX 3-model pipeline: melspectrogram -> embedding -> hey_jarvis_v0.1, threshold > 0.5)",
+            "$ACTIVE_NOTIFICATION_TEXT (ONNX 3-model pipeline active, threshold > 0.5)",
             false
         )
 
@@ -309,8 +332,10 @@ class WakeWordService : Service() {
             var lastUiReportMs = 0L
             var peakRecentScore = 0.0f
 
-            while (!isStopping &&
-                !isTemporarilyPausedForUiMic &&
+            while (isListening &&
+                isActive &&
+                !isStopping.get() &&
+                !isTemporarilyPausedForUiMic.get() &&
                 !isInConversationLoop.get() &&
                 securePrefs.isWakeWordEnabled
             ) {
@@ -332,6 +357,13 @@ class WakeWordService : Service() {
                                 peakRecentScore = 0.0f
                             }
                         },
+                        onStreamRecovering = { err ->
+                            Log.w(TAG, "Recovering wake word AudioRecord stream: ${err.message}")
+                            updateExternalStatus(
+                                "Audio stream interrupted (${err.javaClass.simpleName}) — restarting mic immediately...",
+                                true
+                            )
+                        },
                         onDetected = { score ->
                             triggeredScore = score
                         }
@@ -339,29 +371,41 @@ class WakeWordService : Service() {
 
                     val hitScore = triggeredScore
                     if (hitScore != null) {
+                        isListeningState.set(false)
                         mainHandler.post {
                             onWakeWordTriggered(hitScore)
                         }
                         break
-                    } else {
-                        break
+                    }
+
+                    // If we did NOT trigger and should still be listening, never exit — restart immediately
+                    if (isListening &&
+                        isActive &&
+                        !isStopping.get() &&
+                        !isTemporarilyPausedForUiMic.get() &&
+                        !isInConversationLoop.get() &&
+                        securePrefs.isWakeWordEnabled
+                    ) {
+                        Log.w(TAG, "runDetectionLoop returned without trigger while isListening=true; restarting immediately")
+                        delay(250L)
                     }
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (e: Exception) {
-                    Log.e(TAG, "openWakeWord ONNX pipeline error: ${e.message}", e)
+                    Log.e(TAG, "openWakeWord ONNX loop exception; restarting immediately: ${e.message}", e)
                     updateExternalStatus(
-                        "ONNX pipeline error (${e.javaClass.simpleName}: ${e.message}). Retrying in 2s...",
+                        "ONNX pipeline error (${e.javaClass.simpleName}: ${e.message}). Restarting immediately...",
                         true
                     )
-                    updateForegroundNotification("Wake word audio busy — retrying...")
-                    delay(2_000L)
+                    updateForegroundNotification(ACTIVE_NOTIFICATION_TEXT)
+                    delay(400L)
                 }
             }
         }
     }
 
     private fun stopDetectionCoroutine() {
+        isListeningState.set(false)
         openWakeWordPipeline?.stopAudioCapture()
         val job = detectionLoopJob
         detectionLoopJob = null
@@ -370,13 +414,13 @@ class WakeWordService : Service() {
 
     /**
      * Triggered when `hey_jarvis_v0.1.onnx` score > 0.5:
-     * 1. AudioRecord stream is already stopped & released.
+     * 1. Stop AudioRecord stream.
      * 2. Play chime.
      * 3. Speak "Yes? What do you need?" via VoiceEngine (ElevenLabs / Android TTS).
      * 4. Start SpeechRecognizer to capture command.
      */
     private fun onWakeWordTriggered(score: Float) {
-        if (isStopping) return
+        if (isStopping.get()) return
         if (!isInConversationLoop.compareAndSet(false, true)) return
 
         stopDetectionCoroutine()
@@ -390,25 +434,36 @@ class WakeWordService : Service() {
 
         playActivationChime()
 
-        // Allow 220ms for chime to finish cleanly before speaking prompt
         mainHandler.postDelayed({
-            if (isStopping) {
+            if (isStopping.get()) {
                 isInConversationLoop.set(false)
                 return@postDelayed
             }
             serviceScope.launch {
                 val speechRate = userPrefsStore.getSnapshot().voiceSpeed.coerceIn(0.6f, 1.8f)
-                mainHandler.post {
-                    voiceEngine?.speak(
-                        text = "Yes? What do you need?",
-                        fallbackSpeechRate = speechRate,
-                        onComplete = {
-                            mainHandler.postDelayed({
-                                startCommandSpeechRecognizer()
-                            }, 200L)
-                        }
-                    ) ?: run {
+                val transitioned = AtomicBoolean(false)
+                val proceedToRecognizer = Runnable {
+                    if (transitioned.compareAndSet(false, true)) {
                         startCommandSpeechRecognizer()
+                    }
+                }
+
+                mainHandler.post {
+                    // Safety fallback so SpeechRecognizer always launches even if an OEM TTS callback stalls
+                    mainHandler.postDelayed(proceedToRecognizer, 12_000L)
+                    val engine = voiceEngine
+                    if (engine != null) {
+                        engine.speak(
+                            text = "Yes? What do you need?",
+                            fallbackSpeechRate = speechRate,
+                            onComplete = {
+                                mainHandler.removeCallbacks(proceedToRecognizer)
+                                mainHandler.postDelayed(proceedToRecognizer, 200L)
+                            }
+                        )
+                    } else {
+                        mainHandler.removeCallbacks(proceedToRecognizer)
+                        proceedToRecognizer.run()
                     }
                 }
             }
@@ -429,7 +484,7 @@ class WakeWordService : Service() {
      * Starts Android SpeechRecognizer on the Main thread to capture the user's command.
      */
     private fun startCommandSpeechRecognizer() {
-        if (isStopping) {
+        if (isStopping.get()) {
             isInConversationLoop.set(false)
             return
         }
@@ -512,8 +567,9 @@ class WakeWordService : Service() {
     }
 
     /**
-     * Routes the recognized voice command to Groq ("openai/gpt-oss-120b"), speaks the response
-     * aloud via VoiceEngine (ElevenLabs / Android TTS), and restarts the ONNX wake-word loop.
+     * Routes the recognized voice command to Groq ("openai/gpt-oss-120b") or dynamic local
+     * briefing/task intents, speaks the response aloud via VoiceEngine, and immediately
+     * restarts the infinite ONNX wake-word loop.
      */
     private fun routeCommandToGroqAndSpeak(spokenCommand: String) {
         updateExternalStatus("Sending to Groq: \"$spokenCommand\"", false)
@@ -523,6 +579,7 @@ class WakeWordService : Service() {
             try {
                 repository.recordTurn("USER", spokenCommand)
                 val userPrefs = userPrefsStore.getSnapshot()
+                val displayName = userPrefs.userName.ifBlank { "King Israel" }
                 val speechRate = userPrefs.voiceSpeed.coerceIn(0.6f, 1.8f)
 
                 val parsed = AssistantParser.parse(spokenCommand)
@@ -541,6 +598,46 @@ class WakeWordService : Service() {
                         noteReply
                     }
 
+                    is ParsedIntent.ReadPlan -> {
+                        val briefing = TtsGreetingHelper.buildDynamicBriefing(db, displayName)
+                        repository.recordTurn("ASSISTANT", briefing)
+                        briefing
+                    }
+
+                    is ParsedIntent.Done -> {
+                        val queryLower = parsed.targetQuery.lowercase(Locale.getDefault())
+                        val todayDateStr = java.text.SimpleDateFormat(
+                            "yyyy-MM-dd",
+                            Locale.getDefault()
+                        ).format(java.util.Date())
+                        val matchingChecklist = db.checklistDao().getAllItemsDirect().firstOrNull {
+                            it.title.lowercase(Locale.getDefault()).contains(queryLower) ||
+                                it.id.lowercase(Locale.getDefault()).contains(queryLower)
+                        }
+                        if (matchingChecklist != null) {
+                            repository.markItemDone(
+                                date = todayDateStr,
+                                itemId = matchingChecklist.id,
+                                countValue = matchingChecklist.defaultTargetCount
+                            )
+                            val allCleared = TtsGreetingHelper.countRemainingTasksForToday(db) == 0
+                            val msg = TtsGreetingHelper.buildTaskCompletionSpeech(allCleared)
+                            repository.recordTurn("ASSISTANT", msg)
+                            msg
+                        } else {
+                            val matchingItem = db.itemDao().getItemByTitle(parsed.targetQuery)
+                            if (matchingItem != null) {
+                                repository.updateItemStatus(matchingItem.id, "COMPLETED")
+                                val allCleared = TtsGreetingHelper.countRemainingTasksForToday(db) == 0
+                                val msg = TtsGreetingHelper.buildTaskCompletionSpeech(allCleared)
+                                repository.recordTurn("ASSISTANT", msg)
+                                msg
+                            } else {
+                                askGroqForSpokenReply(spokenCommand, userPrefs)
+                            }
+                        }
+                    }
+
                     is ParsedIntent.CheckEmails -> {
                         if (securePrefs.isImapEnabled &&
                             securePrefs.imapUser.isNotBlank() &&
@@ -557,46 +654,38 @@ class WakeWordService : Service() {
                         emailSummary
                     }
 
-                    else -> {
-                        val aiResult = AiClient.generateAssistantResponse(
-                            userPrompt = spokenCommand,
-                            db = db,
-                            prefs = userPrefs,
-                            securePrefs = securePrefs
-                        )
-                        aiResult.fold(
-                            onSuccess = { aiResp ->
-                                repository.recordTurn("ASSISTANT", aiResp.replyText)
-                                aiResp.replyText
-                            },
-                            onFailure = { err ->
-                                val diag = AiClient.formatThrowableDiagnostic(err)
-                                repository.recordTurn(
-                                    "ASSISTANT",
-                                    "${AiClient.AI_BRAIN_UNREACHABLE_MESSAGE}\n[Diagnostic: $diag]"
-                                )
-                                updateExternalStatus("Groq error: $diag", true)
-                                AiClient.AI_BRAIN_UNREACHABLE_MESSAGE
-                            }
-                        )
-                    }
+                    else -> askGroqForSpokenReply(spokenCommand, userPrefs)
                 }
 
                 mainHandler.post {
-                    if (isStopping) {
+                    if (isStopping.get()) {
                         isInConversationLoop.set(false)
                         return@post
                     }
                     updateForegroundNotification("Speaking response...")
-                    voiceEngine?.speak(
-                        text = replyToSpeak,
-                        fallbackSpeechRate = speechRate,
-                        onComplete = {
-                            mainHandler.postDelayed({
-                                restartWakeWordLoopOnMain()
-                            }, 250L)
+                    val resumed = AtomicBoolean(false)
+                    val resumeAction = Runnable {
+                        if (resumed.compareAndSet(false, true)) {
+                            restartWakeWordLoopOnMain()
                         }
-                    ) ?: restartWakeWordLoopOnMain()
+                    }
+                    // Safety watchdog so wake word ALWAYS resumes even if audio playback stalls
+                    mainHandler.postDelayed(resumeAction, 45_000L)
+
+                    val engine = voiceEngine
+                    if (engine != null) {
+                        engine.speak(
+                            text = replyToSpeak,
+                            fallbackSpeechRate = speechRate,
+                            onComplete = {
+                                mainHandler.removeCallbacks(resumeAction)
+                                mainHandler.postDelayed(resumeAction, 250L)
+                            }
+                        )
+                    } else {
+                        mainHandler.removeCallbacks(resumeAction)
+                        resumeAction.run()
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Jarvis conversation loop error: ${e.message}", e)
@@ -608,18 +697,46 @@ class WakeWordService : Service() {
         }
     }
 
+    private suspend fun askGroqForSpokenReply(
+        spokenCommand: String,
+        userPrefs: com.xestlab.assistant.data.UserPreferencesState
+    ): String {
+        val aiResult = AiClient.generateAssistantResponse(
+            userPrompt = spokenCommand,
+            db = db,
+            prefs = userPrefs,
+            securePrefs = securePrefs
+        )
+        return aiResult.fold(
+            onSuccess = { aiResp ->
+                repository.recordTurn("ASSISTANT", aiResp.replyText)
+                aiResp.replyText
+            },
+            onFailure = { err ->
+                val diag = AiClient.formatThrowableDiagnostic(err)
+                repository.recordTurn(
+                    "ASSISTANT",
+                    "${AiClient.AI_BRAIN_UNREACHABLE_MESSAGE}\n[Diagnostic: $diag]"
+                )
+                updateExternalStatus("Groq error: $diag", true)
+                AiClient.AI_BRAIN_UNREACHABLE_MESSAGE
+            }
+        )
+    }
+
     private fun restartWakeWordLoopOnMain() {
         isInConversationLoop.set(false)
-        if (isStopping) return
+        if (isStopping.get()) return
 
         if (!securePrefs.isWakeWordEnabled) {
             stopDetectionCoroutine()
+            releaseCpuWakeLock()
             stopForegroundSafely()
             stopSelf()
             return
         }
 
-        if (!isTemporarilyPausedForUiMic) {
+        if (!isTemporarilyPausedForUiMic.get()) {
             startOnnxDetectionLoop()
         }
     }
@@ -631,6 +748,40 @@ class WakeWordService : Service() {
         } catch (_: Exception) {
         } finally {
             speechRecognizer = null
+        }
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private fun acquireCpuWakeLock() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val existing = wakeLock
+            if (existing == null) {
+                val created = pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "xestlab:WakeWordContinuousLock"
+                ).apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+                wakeLock = created
+            } else if (!existing.isHeld) {
+                existing.acquire()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to acquire WakeWord PARTIAL_WAKE_LOCK: ${e.message}")
+        }
+    }
+
+    private fun releaseCpuWakeLock() {
+        try {
+            val existing = wakeLock
+            if (existing?.isHeld == true) {
+                existing.release()
+            }
+        } catch (_: Exception) {
+        } finally {
+            wakeLock = null
         }
     }
 
@@ -660,7 +811,7 @@ class WakeWordService : Service() {
     }
 
     private fun updateForegroundNotification(statusLine: String) {
-        if (isStopping) return
+        if (isStopping.get()) return
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         try {
             manager.notify(NOTIFICATION_ID, buildPersistentNotification(statusLine))
@@ -723,13 +874,15 @@ class WakeWordService : Service() {
     }
 
     override fun onDestroy() {
-        isStopping = true
+        isStopping.set(true)
+        isListeningState.set(false)
         _isRunningFlow.value = false
         mainHandler.removeCallbacksAndMessages(null)
         destroySpeechRecognizerOnMain()
         stopDetectionCoroutine()
         openWakeWordPipeline?.close()
         openWakeWordPipeline = null
+        releaseCpuWakeLock()
         try {
             toneGenerator?.release()
             toneGenerator = null

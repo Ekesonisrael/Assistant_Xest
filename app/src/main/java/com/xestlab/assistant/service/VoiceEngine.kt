@@ -137,6 +137,13 @@ class VoiceEngine(
                     activeOnDoneCallback = null
                     cb?.invoke()
                 }
+
+                override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                    onSpeakingStateChanged(false)
+                    val cb = activeOnDoneCallback
+                    activeOnDoneCallback = null
+                    cb?.invoke()
+                }
             })
             isTtsReady = true
             queuedFallbackText?.let { pending ->

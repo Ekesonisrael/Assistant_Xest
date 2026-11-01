@@ -26,6 +26,7 @@ import com.xestlab.assistant.data.repository.AssistantRepository
 import com.xestlab.assistant.data.repository.WeeklySummaryData
 import com.xestlab.assistant.service.AlarmScheduler
 import com.xestlab.assistant.service.EmailHelper
+import com.xestlab.assistant.service.TtsGreetingHelper
 import com.xestlab.assistant.service.VoiceEngine
 import com.xestlab.assistant.service.WakeWordService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -331,13 +332,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                         refreshDailyPlanText()
                         refreshWeeklySummary()
-                        respond("Well done $name! Completed: ${matchingChecklist.title}.", speak = true)
+                        val allCleared = TtsGreetingHelper.countRemainingTasksForToday(db) == 0
+                        respond(TtsGreetingHelper.buildTaskCompletionSpeech(allCleared), speak = true)
                     } else {
                         val matchingItem = db.itemDao().getItemByTitle(intent.targetQuery)
                         if (matchingItem != null) {
                             repository.updateItemStatus(matchingItem.id, "COMPLETED")
                             refreshDailyPlanText()
-                            respond("Nice work $name! Checked off: ${matchingItem.title}.", speak = true)
+                            val allCleared = TtsGreetingHelper.countRemainingTasksForToday(db) == 0
+                            respond(TtsGreetingHelper.buildTaskCompletionSpeech(allCleared), speak = true)
                         } else {
                             routeChatToBrainOrOffline(cleaned, prefs)
                         }
@@ -519,14 +522,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * Marks a task complete and speaks a congratulatory message.
+     * Marks a task complete and speaks a varied, non-repeating supportive message.
      */
     fun markTaskComplete(item: Item) {
         viewModelScope.launch {
             repository.updateItemStatus(item.id, "COMPLETED")
             refreshDailyPlanText()
-            val name = prefsState.value.userName.ifBlank { "King Israel" }
-            speakText("Well done $name! '${item.title}' is complete.")
+            val allCleared = TtsGreetingHelper.countRemainingTasksForToday(db) == 0
+            speakText(TtsGreetingHelper.buildTaskCompletionSpeech(allCleared))
         }
     }
 
@@ -562,25 +565,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * Toggles a daily checklist item and speaks congratulations TTS on completion.
+     * Toggles a daily checklist item and speaks a varied, non-repeating supportive phrase on completion.
      */
     fun toggleChecklistDone(item: ChecklistItem, currentlyDone: Boolean, countValue: Int = 0) {
         viewModelScope.launch {
-            val name = prefsState.value.userName.ifBlank { "King Israel" }
             if (!currentlyDone) {
                 val count = if (item.isCountType && countValue <= 0) item.defaultTargetCount else countValue
                 repository.markItemDone(todayDateString, item.id, count)
 
-                val allChecklist = db.checklistDao().getAllItemsDirect()
-                val updatedLogs = db.dailyLogDao().getLogsForDateDirect(todayDateString).associateBy { it.itemId }
-                val allCompleted = allChecklist.isNotEmpty() && allChecklist.all { updatedLogs[it.id]?.isDone == true }
-
-                val congratsLine = if (allCompleted) {
-                    "Congratulations $name! Every single daily target is complete today. Elite discipline!"
-                } else {
-                    "Great work $name! ${item.title} is done. Keep pushing!"
-                }
-                speakText(congratsLine)
+                val allCleared = TtsGreetingHelper.countRemainingTasksForToday(db) == 0
+                speakText(TtsGreetingHelper.buildTaskCompletionSpeech(allCleared))
             } else {
                 repository.markItemNotDone(todayDateString, item.id, "Unchecked")
             }
@@ -855,7 +849,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             refreshSavedKeySummaries()
         }
         val displayName = prefsState.value.userName.ifBlank { "King Israel" }
-        speakText("Good morning $displayName, how are you doing? Xestlab Assistant neural voice is active and ready.")
+        val greeting = TtsGreetingHelper.getTimeAwareGreeting(displayName)
+        speakText("$greeting Xestlab Assistant neural voice is active and ready.")
     }
 
     // --- Smart IMAP Email Checker ---

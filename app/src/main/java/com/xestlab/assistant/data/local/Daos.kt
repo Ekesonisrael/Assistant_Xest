@@ -36,6 +36,17 @@ interface ChecklistDao {
     @Query("SELECT * FROM checklist_items ORDER BY orderIndex ASC")
     suspend fun getAllItemsDirect(): List<ChecklistItem>
 
+    @Query(
+        """
+        SELECT * FROM checklist_items
+        WHERE id NOT IN (
+            SELECT itemId FROM daily_logs WHERE date = :date AND isDone = 1
+        )
+        ORDER BY orderIndex ASC
+        """
+    )
+    suspend fun getRemainingChecklistForDateDirect(date: String): List<ChecklistItem>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertItems(items: List<ChecklistItem>)
 }
@@ -107,6 +118,22 @@ interface ItemDao {
 
     @Query("SELECT * FROM items WHERE status = 'PENDING' AND type != 'NOTE' ORDER BY CASE WHEN dueAt IS NULL THEN 1 ELSE 0 END, dueAt ASC, createdAt DESC")
     suspend fun getPendingItemsDirect(): List<Item>
+
+    @Query(
+        """
+        SELECT * FROM items
+        WHERE status = 'PENDING'
+          AND type NOT IN ('NOTE', 'GOAL')
+          AND sourceText NOT LIKE 'web_pipeline_%'
+          AND (dueAt IS NULL OR dueAt <= :endOfTodayMillis)
+        ORDER BY
+          CASE WHEN priority = 'HIGH' THEN 0 ELSE 1 END ASC,
+          CASE WHEN dueAt IS NULL THEN 1 ELSE 0 END ASC,
+          dueAt ASC,
+          createdAt DESC
+        """
+    )
+    suspend fun getRemainingTasksForTodayDirect(endOfTodayMillis: Long): List<Item>
 
     @Query("SELECT * FROM items WHERE type = 'NOTE' AND (title LIKE '%' || :query || '%' OR details LIKE '%' || :query || '%') ORDER BY createdAt DESC")
     fun searchNotes(query: String): Flow<List<Item>>

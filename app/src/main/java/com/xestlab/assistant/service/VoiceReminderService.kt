@@ -85,19 +85,12 @@ class VoiceReminderService : Service() {
             }
 
             val db = AppDatabase.getInstance(applicationContext)
-            val repo = AssistantRepository(db, userPrefsStore)
+            val displayName = prefs.userName.ifBlank { "King Israel" }
 
-            val spokenScript = when {
-                !customText.isNullOrBlank() -> customText
-                isWakeUp -> {
-                    // Natural 7:30 AM greeting: "Good morning King Israel, how are you doing? Let's start with..."
-                    AiClient.generateCoachBriefing(briefingTitle, db, prefs, securePrefs)
-                        ?: repo.buildSpokenDailyPlan(isWakeUpAlarm = true)
-                }
-                else -> {
-                    AiClient.generateCoachBriefing(briefingTitle, db, prefs, securePrefs)
-                        ?: repo.buildSpokenDailyPlan(overrideGreetingPrefix = briefingTitle)
-                }
+            val spokenScript = if (!customText.isNullOrBlank()) {
+                customText
+            } else {
+                TtsGreetingHelper.buildDynamicBriefing(db, displayName)
             }
 
             voiceEngine.speak(

@@ -71,6 +71,7 @@ import com.xestlab.assistant.ai.PlannerProposal
 import com.xestlab.assistant.data.model.ConversationTurn
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.UnreadEmailEntity
+import com.xestlab.assistant.service.TtsGreetingHelper
 import com.xestlab.assistant.service.WakeWordService
 import com.xestlab.assistant.ui.theme.BgDark
 import com.xestlab.assistant.ui.theme.BorderDark
@@ -228,12 +229,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
         }
     }
 
-    val hour = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
-    val greetingPrefix = when {
-        hour < 12 -> "Good morning"
-        hour < 17 -> "Good afternoon"
-        else -> "Good evening"
-    }
+    val greetingPrefix = TtsGreetingHelper.getGreetingWord()
     val displayName = prefs.userName.ifBlank { "King Israel" }
     val doneChecklistCount = remember(checklistItems, todayLogs) {
         val logMap = todayLogs.associateBy { it.itemId }

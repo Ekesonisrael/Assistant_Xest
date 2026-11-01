@@ -5,6 +5,7 @@ import com.xestlab.assistant.data.LlmProvider
 import com.xestlab.assistant.data.SecurePreferences
 import com.xestlab.assistant.data.UserPreferencesState
 import com.xestlab.assistant.data.local.AppDatabase
+import com.xestlab.assistant.service.TtsGreetingHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -55,7 +56,7 @@ object AiClient {
     // const val GEMINI_MODEL = "gemini-1.5-flash-latest"
 
     const val SYSTEM_COACH_PROMPT =
-        "You are Xestlab Assistant, a strict but supportive business coach for King Israel. Keep replies conversational, short, and punchy."
+        "You are Xestlab Assistant, a supportive, intelligent, and dynamic business coach for King Israel. Keep your answers short, conversational, and varied. Never sound robotic."
 
     const val AI_BRAIN_UNREACHABLE_MESSAGE =
         "I cannot reach the AI brain right now. Check your internet or API key."
@@ -144,16 +145,24 @@ object AiClient {
         try {
             val localContext = buildLocalContext(db, prefs)
             val customWakeName = securePrefs.wakeWordName
-            val combinedUserText = buildString {
+            val recentTurns = db.conversationDao()
+                .getLastTurnsDirect(6)
+                .reversed()
+                .filter { it.text.isNotBlank() && it.text != userPrompt }
+
+            val systemInstruction = buildString {
                 appendLine(SYSTEM_COACH_PROMPT)
                 if (customWakeName.isNotBlank()) {
-                    appendLine("Your user-configured assistant wake word name is \"$customWakeName\". Respond naturally as $customWakeName when addressed by that name.")
+                    appendLine("Your wake word name is \"$customWakeName\". Respond naturally if addressed as $customWakeName.")
                 }
-                appendLine("Reply in plain spoken sentences with no markdown, backticks, asterisks, or emojis because your reply will be spoken aloud via TextToSpeech.")
-                appendLine()
-                appendLine("Workspace Context:")
+                appendLine("Vary your sentence openings, cadence, and phrasing every turn so you never repeat yourself or sound scripted.")
+                append("Reply in plain spoken sentences with no markdown, backticks, asterisks, bullet symbols, or emojis because your reply will be spoken aloud via TextToSpeech.")
+            }
+
+            val contextualUserMessage = buildString {
+                appendLine("Live Workspace Context:")
                 appendLine(localContext)
-                appendLine("User message: $userPrompt")
+                append("King Israel says: $userPrompt")
             }
 
             val groqKey = securePrefs.getKeyForProvider(LlmProvider.GROQ)
@@ -161,9 +170,16 @@ object AiClient {
                     IllegalStateException("No Groq API key found in EncryptedSharedPreferences.")
                 )
 
+            val historyPairs = recentTurns.map { turn ->
+                val role = if (turn.sender.equals("ASSISTANT", ignoreCase = true)) "assistant" else "user"
+                role to turn.text.take(350)
+            }
+
             executeGroqPost(
                 rawApiKey = groqKey,
-                userText = combinedUserText
+                systemPrompt = systemInstruction,
+                historyTurns = historyPairs,
+                userText = contextualUserMessage
             ).map { diag ->
                 AssistantResponse(
                     replyText = sanitizeForSpeech(diag.replyText),
@@ -203,13 +219,9 @@ object AiClient {
         db: AppDatabase,
         prefs: UserPreferencesState,
         securePrefs: SecurePreferences
-    ): String? = withContext(Dispatchers.IO) {
-        if (!securePrefs.isAiEnabled || !securePrefs.hasGroqKey()) {
-            return@withContext null
-        }
+    ): String {
         val displayName = prefs.userName.ifBlank { "King Israel" }
-        val prompt = "Deliver a natural 2-sentence spoken $briefingTitle starting with 'Good morning $displayName, how are you doing? Let's start with...' grounded in the remaining checklist and top task."
-        generateAssistantResponse(prompt, db, prefs, securePrefs).getOrNull()?.replyText
+        return TtsGreetingHelper.buildDynamicBriefing(db, displayName)
     }
 
     suspend fun analyzeEmailForTaskOrInvoice(
@@ -311,7 +323,8 @@ object AiClient {
             }
             executeGroqPost(
                 rawApiKey = cleanKey,
-                userText = "Reply in one short spoken sentence: Groq brain online and ready for King Israel."
+                systemPrompt = SYSTEM_COACH_PROMPT,
+                userText = "Give King Israel a fresh, short one-sentence check-in confirming the Groq coaching brain is online."
             )
         }
 
@@ -320,27 +333,46 @@ object AiClient {
      * - URL: https://api.groq.com/openai/v1/chat/completions
      * - Headers: Authorization: Bearer <key>, Content-Type: application/json
      * - Model: Hardcoded to "openai/gpt-oss-120b"
-     * - JSON Body built cleanly with JSONObject:
-     *   {"model": "openai/gpt-oss-120b", "messages": [{"role": "user", "content": "YOUR_TEXT_HERE"}]}
+     * - Includes dynamic system coach prompt + recent conversation turns for natural variety
      * - Response Parsing: choices[0].message.content
      */
     private fun executeGroqPost(
         rawApiKey: String,
+        systemPrompt: String? = SYSTEM_COACH_PROMPT,
+        historyTurns: List<Pair<String, String>> = emptyList(),
         userText: String
     ): Result<ApiDiagnosticResult> {
         return try {
             val apiKey = SecurePreferences.sanitizeApiKey(rawApiKey)
 
-            val userMessageObject = JSONObject().apply {
-                put("role", "user")
-                put("content", userText)
-            }
             val messagesArray = JSONArray().apply {
-                put(userMessageObject)
+                if (!systemPrompt.isNullOrBlank()) {
+                    put(
+                        JSONObject().apply {
+                            put("role", "system")
+                            put("content", systemPrompt)
+                        }
+                    )
+                }
+                historyTurns.forEach { (role, content) ->
+                    put(
+                        JSONObject().apply {
+                            put("role", role)
+                            put("content", content)
+                        }
+                    )
+                }
+                put(
+                    JSONObject().apply {
+                        put("role", "user")
+                        put("content", userText)
+                    }
+                )
             }
             val payload = JSONObject().apply {
                 put("model", GROQ_MODEL)
                 put("messages", messagesArray)
+                put("temperature", 0.8)
             }
 
             val request = Request.Builder()

@@ -65,10 +65,12 @@ class AlarmReceiver : BroadcastReceiver() {
 
                 val displayName = prefs.userName.ifBlank { "King Israel" }
 
+                val dynamicWakeGreeting = TtsGreetingHelper.getTimeAwareGreeting(displayName).removeSuffix(".")
+
                 postHeadsUpNotification(
                     context = context,
                     notificationId = alarmId.hashCode(),
-                    title = if (isWakeUp) "Good morning $displayName" else title,
+                    title = if (isWakeUp) dynamicWakeGreeting else title,
                     subtitle = if (isWakeUp) {
                         "7:30 AM Daily Plan Briefing - Tap to open"
                     } else if (!contactName.isNullOrBlank()) {

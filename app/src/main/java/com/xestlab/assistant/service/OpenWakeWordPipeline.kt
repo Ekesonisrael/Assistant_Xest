@@ -13,6 +13,7 @@ import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.nio.FloatBuffer
@@ -20,16 +21,19 @@ import java.util.Arrays
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Full 3-stage openWakeWord ONNX Runtime preprocessing & wake-word detection pipeline:
+ * Resilient 3-stage openWakeWord ONNX Runtime preprocessing & wake-word detection pipeline:
  *
- * 1. Audio capture: 16kHz, mono, 16-bit PCM via [AudioRecord] in 1280-sample (80ms) chunks
- *    with a 480-sample STFT overlap (1760 samples per frame -> 8 mel frames x 32 bins).
- * 2. Stage 1 ("melspectrogram.onnx"): Raw PCM samples -> mel-spectrogram -> scaled via `(x / 10f) + 2f`
- *    into a 76-frame sliding window `[1, 76, 32, 1]`.
- * 3. Stage 2 ("embedding_model.onnx"): `[1, 76, 32, 1]` mel window -> 96-dimensional speech embedding
- *    appended into a 16-step rolling sequence `[1, 16, 96]`.
- * 4. Stage 3 ("hey_jarvis_v0.1.onnx"): `[1, 16, 96]` embedding sequence -> probability score `[0.0, 1.0]`.
- *    Triggers immediately when `score > 0.5f`.
+ * - Runs an infinite `while (isListening)` loop inside a background Coroutine.
+ * - Dynamically queries `AudioRecord.getMinBufferSize(16000, CHANNEL_IN_MONO, ENCODING_PCM_16BIT)`
+ *   on every recording start.
+ * - Never breaks on 0/empty/partial reads; accumulates PCM samples cleanly into 1280-sample
+ *   (80ms) ONNX frames with a 480-sample STFT overlap (`[1, 1760]`).
+ * - Catches and logs any `AudioRecord` or ONNX exception, releases the previous `AudioRecord`,
+ *   and immediately restarts recording inside `while (isListening)` so it never stops listening.
+ * - Pipeline stages:
+ *   1. "melspectrogram.onnx" -> scaled via `(x / 10f) + 2f` into `[1, 76, 32, 1]`
+ *   2. "embedding_model.onnx" -> 96-dim speech embedding into `[1, 16, 96]`
+ *   3. "hey_jarvis_v0.1.onnx" -> probability score `[0.0, 1.0]`, triggering when `score > 0.5f`.
  */
 class OpenWakeWordPipeline(context: Context) {
 
@@ -65,7 +69,10 @@ class OpenWakeWordPipeline(context: Context) {
     private var wakeWordInputName: String = "x.1"
     private var classifierFrames: Int = DEFAULT_CLASSIFIER_FRAMES
 
-    private val captureActive = AtomicBoolean(false)
+    private val listeningState = AtomicBoolean(false)
+
+    val isListening: Boolean
+        get() = listeningState.get()
 
     @Volatile
     private var activeAudioRecord: AudioRecord? = null
@@ -134,196 +141,258 @@ class OpenWakeWordPipeline(context: Context) {
     }
 
     /**
-     * Captures 16kHz 16-bit mono PCM audio on a background Coroutine, runs every 80ms frame
-     * sequentially through `melspectrogram.onnx` -> `embedding_model.onnx` -> `hey_jarvis_v0.1.onnx`,
-     * and stops the [AudioRecord] stream + invokes [onDetected] as soon as `score > 0.5f`.
+     * Runs an infinite `while (isListening)` recording & ONNX inference loop inside a Coroutine.
+     *
+     * - Reads buffer size dynamically via `AudioRecord.getMinBufferSize()`.
+     * - Never breaks on 0/empty reads (`readCount == 0` yields briefly and continues).
+     * - If any `AudioRecord` or ONNX exception occurs, catches it, logs it, releases the old
+     *   `AudioRecord`, and immediately restarts recording so wake-word listening never drops out.
+     * - Only exits when `score > 0.5f` (to hand the mic to SpeechRecognizer) or when
+     *   [stopAudioCapture] / Coroutine cancellation explicitly stops listening.
      */
     @SuppressLint("MissingPermission")
     suspend fun runDetectionLoop(
         onScoreUpdate: (Float) -> Unit = {},
+        onStreamRecovering: (Throwable) -> Unit = {},
         onDetected: (Float) -> Unit
     ) = withContext(Dispatchers.Default) {
-        ensureModelsLoaded()
-
-        val melSess = melSession
-            ?: throw IllegalStateException("$MEL_MODEL_ASSET session not initialized")
-        val embSess = embeddingSession
-            ?: throw IllegalStateException("$EMBEDDING_MODEL_ASSET session not initialized")
-        val wakeSess = wakeWordSession
-            ?: throw IllegalStateException("$WAKE_WORD_MODEL_ASSET session not initialized")
-
-        val minBufBytes = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE_HZ,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        if (minBufBytes <= 0) {
-            throw IllegalStateException("AudioRecord.getMinBufferSize failed ($minBufBytes) for 16kHz mono PCM")
-        }
-        val recordBufferBytes = maxOf(minBufBytes * 2, CHUNK_SAMPLES * 2 * 4)
-
-        val recorder = createInitializedAudioRecord(recordBufferBytes)
-        activeAudioRecord = recorder
-        captureActive.set(true)
-
-        // Pre-allocated rolling buffers matching official dscripka/openWakeWord AudioFeatures:
-        val pcmChunk = ShortArray(CHUNK_SAMPLES)
-        val overlapTail = ShortArray(OVERLAP_SAMPLES) // Zero-filled on start
-        val melAudioInput = FloatArray(MEL_INPUT_SAMPLES)
-
-        // 76 x 32 mel window initialized to 1.0f (matching np.ones((76, 32)) in openWakeWord)
-        val melWindow = FloatArray(MEL_WINDOW_FRAMES * MEL_BINS)
-        Arrays.fill(melWindow, 1.0f)
-
-        val seqFrames = classifierFrames
-        val embeddingWindow = FloatArray(seqFrames * EMBEDDING_DIM)
-        val singleEmbedding = FloatArray(EMBEDDING_DIM)
-
-        val melInputShape = longArrayOf(1L, MEL_INPUT_SAMPLES.toLong())
-        val embInputShape = longArrayOf(1L, MEL_WINDOW_FRAMES.toLong(), MEL_BINS.toLong(), 1L)
-        val wakeInputShape = longArrayOf(1L, seqFrames.toLong(), EMBEDDING_DIM.toLong())
-
-        var chunksProcessed = 0
+        listeningState.set(true)
         var detectedScore: Float? = null
 
-        try {
-            recorder.startRecording()
-            if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                throw IllegalStateException(
-                    "Microphone unavailable (AudioRecord state=${recorder.recordingState}). Another app may be holding the mic."
-                )
-            }
+        while (isListening && currentCoroutineContext().isActive) {
+            var recorder: AudioRecord? = null
+            try {
+                ensureModelsLoaded()
 
-            while (currentCoroutineContext().isActive && captureActive.get()) {
-                var samplesCollected = 0
-                while (samplesCollected < CHUNK_SAMPLES &&
-                    currentCoroutineContext().isActive &&
-                    captureActive.get()
+                val melSess = melSession
+                    ?: throw IllegalStateException("$MEL_MODEL_ASSET session not initialized")
+                val embSess = embeddingSession
+                    ?: throw IllegalStateException("$EMBEDDING_MODEL_ASSET session not initialized")
+                val wakeSess = wakeWordSession
+                    ?: throw IllegalStateException("$WAKE_WORD_MODEL_ASSET session not initialized")
+
+                // Dynamically read hardware minimum buffer size on every recording session start
+                val rawMinBufferBytes = AudioRecord.getMinBufferSize(
+                    SAMPLE_RATE_HZ,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                if (rawMinBufferBytes == AudioRecord.ERROR ||
+                    rawMinBufferBytes == AudioRecord.ERROR_BAD_VALUE ||
+                    rawMinBufferBytes <= 0
                 ) {
-                    val readCount = recorder.read(
-                        pcmChunk,
-                        samplesCollected,
-                        CHUNK_SAMPLES - samplesCollected,
-                        AudioRecord.READ_BLOCKING
+                    throw IllegalStateException(
+                        "AudioRecord.getMinBufferSize returned invalid value ($rawMinBufferBytes)"
                     )
-                    if (readCount > 0) {
-                        samplesCollected += readCount
-                    } else if (readCount < 0) {
-                        throw IllegalStateException("AudioRecord.read failed with error code $readCount")
-                    } else {
-                        break
-                    }
                 }
 
-                if (samplesCollected < CHUNK_SAMPLES || !captureActive.get() || !currentCoroutineContext().isActive) {
-                    break
+                // Allocate a generous OS ring buffer (>= 2x minBufferSize) and a dynamic short read buffer
+                val recordBufferBytes = maxOf(rawMinBufferBytes * 2, CHUNK_SAMPLES * 2 * 4)
+                val dynamicReadBufferSizeShorts = maxOf(rawMinBufferBytes / 2, CHUNK_SAMPLES)
+                val dynamicReadBuffer = ShortArray(dynamicReadBufferSizeShorts)
+
+                recorder = createInitializedAudioRecord(recordBufferBytes)
+                activeAudioRecord = recorder
+
+                // Rolling STFT & ONNX feature buffers
+                val pcmChunk = ShortArray(CHUNK_SAMPLES)
+                var pcmChunkFill = 0
+                val overlapTail = ShortArray(OVERLAP_SAMPLES)
+                val melAudioInput = FloatArray(MEL_INPUT_SAMPLES)
+
+                val melWindow = FloatArray(MEL_WINDOW_FRAMES * MEL_BINS)
+                Arrays.fill(melWindow, 1.0f)
+
+                val seqFrames = classifierFrames
+                val embeddingWindow = FloatArray(seqFrames * EMBEDDING_DIM)
+                val singleEmbedding = FloatArray(EMBEDDING_DIM)
+
+                val melInputShape = longArrayOf(1L, MEL_INPUT_SAMPLES.toLong())
+                val embInputShape = longArrayOf(1L, MEL_WINDOW_FRAMES.toLong(), MEL_BINS.toLong(), 1L)
+                val wakeInputShape = longArrayOf(1L, seqFrames.toLong(), EMBEDDING_DIM.toLong())
+
+                var chunksProcessed = 0
+
+                recorder.startRecording()
+                if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                    throw IllegalStateException(
+                        "AudioRecord failed to enter RECORDSTATE_RECORDING (state=${recorder.recordingState})"
+                    )
                 }
 
-                // Assemble 1760-sample STFT window: [480 previous samples] + [1280 new samples]
-                for (i in 0 until OVERLAP_SAMPLES) {
-                    melAudioInput[i] = overlapTail[i].toFloat()
-                }
-                for (i in 0 until CHUNK_SAMPLES) {
-                    melAudioInput[OVERLAP_SAMPLES + i] = pcmChunk[i].toFloat()
-                }
-                // Save trailing 480 samples for next 80ms step
-                System.arraycopy(
-                    pcmChunk,
-                    CHUNK_SAMPLES - OVERLAP_SAMPLES,
-                    overlapTail,
-                    0,
-                    OVERLAP_SAMPLES
+                Log.i(
+                    TAG,
+                    "AudioRecord infinite loop active (minBuffer=${rawMinBufferBytes}B, " +
+                        "ringBuffer=${recordBufferBytes}B, readArray=${dynamicReadBufferSizeShorts} shorts)"
                 )
 
-                // Stage 1: melspectrogram.onnx + element-wise (value / 10f) + 2f normalization
-                OnnxTensor.createTensor(
-                    ortEnv,
-                    FloatBuffer.wrap(melAudioInput),
-                    melInputShape
-                ).use { melInputTensor ->
-                    melSess.run(mapOf(melInputName to melInputTensor)).use { melResult ->
-                        val melOutTensor = melResult[0] as OnnxTensor
-                        val rawMelBuf = melOutTensor.floatBuffer
-                        val newFloats = rawMelBuf.remaining()
+                // Infinite inner audio read loop — never breaks on 0/empty reads
+                while (isListening && currentCoroutineContext().isActive) {
+                    val shortsRead = recorder.read(
+                        dynamicReadBuffer,
+                        0,
+                        CHUNK_SAMPLES.coerceAtMost(dynamicReadBuffer.size)
+                    )
 
-                        if (newFloats > 0 && newFloats % MEL_BINS == 0) {
-                            val shift = newFloats.coerceAtMost(melWindow.size)
-                            val keep = melWindow.size - shift
-                            if (keep > 0) {
-                                System.arraycopy(melWindow, shift, melWindow, 0, keep)
-                            }
-                            // If model returned more than 76 frames, skip older excess frames
-                            if (newFloats > shift) {
-                                rawMelBuf.position(rawMelBuf.position() + (newFloats - shift))
-                            }
-                            for (idx in keep until melWindow.size) {
-                                val rawVal = rawMelBuf.get()
-                                melWindow[idx] = (rawVal / 10.0f) + 2.0f
-                            }
-                        }
-                    }
-                }
-
-                // Stage 2: embedding_model.onnx ([1, 76, 32, 1] -> 96-dim feature vector)
-                OnnxTensor.createTensor(
-                    ortEnv,
-                    FloatBuffer.wrap(melWindow),
-                    embInputShape
-                ).use { embInputTensor ->
-                    embSess.run(mapOf(embeddingInputName to embInputTensor)).use { embResult ->
-                        val embOutTensor = embResult[0] as OnnxTensor
-                        val embBuf = embOutTensor.floatBuffer
-                        val count = minOf(embBuf.remaining(), EMBEDDING_DIM)
-                        for (i in 0 until count) {
-                            singleEmbedding[i] = embBuf.get()
-                        }
-                        for (i in count until EMBEDDING_DIM) {
-                            singleEmbedding[i] = 0.0f
-                        }
-                    }
-                }
-
-                // Slide [seqFrames x 96] embedding sequence forward by 1 step
-                val keepEmbFloats = embeddingWindow.size - EMBEDDING_DIM
-                if (keepEmbFloats > 0) {
-                    System.arraycopy(embeddingWindow, EMBEDDING_DIM, embeddingWindow, 0, keepEmbFloats)
-                }
-                System.arraycopy(singleEmbedding, 0, embeddingWindow, keepEmbFloats, EMBEDDING_DIM)
-
-                chunksProcessed++
-
-                // Stage 3: hey_jarvis_v0.1.onnx ([1, 16, 96] -> wake-word probability score)
-                // Wait until the 16-step embedding window is populated with real microphone frames (~1.28s)
-                if (chunksProcessed >= seqFrames) {
-                    val score: Float = OnnxTensor.createTensor(
-                        ortEnv,
-                        FloatBuffer.wrap(embeddingWindow),
-                        wakeInputShape
-                    ).use { wakeInputTensor ->
-                        wakeSess.run(mapOf(wakeWordInputName to wakeInputTensor)).use { wakeResult ->
-                            val wakeOutTensor = wakeResult[0] as OnnxTensor
-                            val scoreBuf = wakeOutTensor.floatBuffer
-                            if (scoreBuf.remaining() > 0) scoreBuf.get() else 0.0f
-                        }
-                    }
-
-                    onScoreUpdate(score)
-
-                    if (score > TRIGGER_THRESHOLD) {
-                        Log.i(TAG, "Wake word 'Hey Jarvis' triggered! Score=$score (> $TRIGGER_THRESHOLD)")
-                        detectedScore = score
-                        captureActive.set(false)
+                    if (!isListening || !currentCoroutineContext().isActive) {
                         break
                     }
+
+                    if (shortsRead == 0) {
+                        // Transient empty/null HAL read — do NOT break; yield briefly and continue listening
+                        delay(10L)
+                        continue
+                    }
+
+                    if (shortsRead < 0) {
+                        throw IllegalStateException(
+                            "AudioRecord.read returned error code $shortsRead (recordingState=${recorder.recordingState})"
+                        )
+                    }
+
+                    var cursor = 0
+                    while (cursor < shortsRead && isListening && currentCoroutineContext().isActive) {
+                        val needed = CHUNK_SAMPLES - pcmChunkFill
+                        val toCopy = minOf(needed, shortsRead - cursor)
+                        System.arraycopy(dynamicReadBuffer, cursor, pcmChunk, pcmChunkFill, toCopy)
+                        pcmChunkFill += toCopy
+                        cursor += toCopy
+
+                        if (pcmChunkFill == CHUNK_SAMPLES) {
+                            pcmChunkFill = 0
+
+                            // Assemble 1760-sample STFT window: [480 overlap] + [1280 new PCM samples]
+                            for (i in 0 until OVERLAP_SAMPLES) {
+                                melAudioInput[i] = overlapTail[i].toFloat()
+                            }
+                            for (i in 0 until CHUNK_SAMPLES) {
+                                melAudioInput[OVERLAP_SAMPLES + i] = pcmChunk[i].toFloat()
+                            }
+                            System.arraycopy(
+                                pcmChunk,
+                                CHUNK_SAMPLES - OVERLAP_SAMPLES,
+                                overlapTail,
+                                0,
+                                OVERLAP_SAMPLES
+                            )
+
+                            // Stage 1: melspectrogram.onnx + (value / 10f) + 2f scaling
+                            OnnxTensor.createTensor(
+                                ortEnv,
+                                FloatBuffer.wrap(melAudioInput),
+                                melInputShape
+                            ).use { melInputTensor ->
+                                melSess.run(mapOf(melInputName to melInputTensor)).use { melResult ->
+                                    val melOutTensor = melResult[0] as OnnxTensor
+                                    val rawMelBuf = melOutTensor.floatBuffer
+                                    val newFloats = rawMelBuf.remaining()
+
+                                    if (newFloats > 0 && newFloats % MEL_BINS == 0) {
+                                        val shift = newFloats.coerceAtMost(melWindow.size)
+                                        val keep = melWindow.size - shift
+                                        if (keep > 0) {
+                                            System.arraycopy(melWindow, shift, melWindow, 0, keep)
+                                        }
+                                        if (newFloats > shift) {
+                                            rawMelBuf.position(rawMelBuf.position() + (newFloats - shift))
+                                        }
+                                        for (idx in keep until melWindow.size) {
+                                            val rawVal = rawMelBuf.get()
+                                            melWindow[idx] = (rawVal / 10.0f) + 2.0f
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Stage 2: embedding_model.onnx ([1, 76, 32, 1] -> 96-dim speech embedding)
+                            OnnxTensor.createTensor(
+                                ortEnv,
+                                FloatBuffer.wrap(melWindow),
+                                embInputShape
+                            ).use { embInputTensor ->
+                                embSess.run(mapOf(embeddingInputName to embInputTensor)).use { embResult ->
+                                    val embOutTensor = embResult[0] as OnnxTensor
+                                    val embBuf = embOutTensor.floatBuffer
+                                    val count = minOf(embBuf.remaining(), EMBEDDING_DIM)
+                                    for (i in 0 until count) {
+                                        singleEmbedding[i] = embBuf.get()
+                                    }
+                                    for (i in count until EMBEDDING_DIM) {
+                                        singleEmbedding[i] = 0.0f
+                                    }
+                                }
+                            }
+
+                            val keepEmbFloats = embeddingWindow.size - EMBEDDING_DIM
+                            if (keepEmbFloats > 0) {
+                                System.arraycopy(
+                                    embeddingWindow,
+                                    EMBEDDING_DIM,
+                                    embeddingWindow,
+                                    0,
+                                    keepEmbFloats
+                                )
+                            }
+                            System.arraycopy(
+                                singleEmbedding,
+                                0,
+                                embeddingWindow,
+                                keepEmbFloats,
+                                EMBEDDING_DIM
+                            )
+
+                            chunksProcessed++
+
+                            // Stage 3: hey_jarvis_v0.1.onnx ([1, 16, 96] -> probability score)
+                            if (chunksProcessed >= seqFrames) {
+                                val score: Float = OnnxTensor.createTensor(
+                                    ortEnv,
+                                    FloatBuffer.wrap(embeddingWindow),
+                                    wakeInputShape
+                                ).use { wakeInputTensor ->
+                                    wakeSess.run(mapOf(wakeWordInputName to wakeInputTensor)).use { wakeResult ->
+                                        val wakeOutTensor = wakeResult[0] as OnnxTensor
+                                        val scoreBuf = wakeOutTensor.floatBuffer
+                                        if (scoreBuf.remaining() > 0) scoreBuf.get() else 0.0f
+                                    }
+                                }
+
+                                onScoreUpdate(score)
+
+                                if (score > TRIGGER_THRESHOLD) {
+                                    Log.i(
+                                        TAG,
+                                        "Wake word 'Hey Jarvis' triggered! Score=$score (> $TRIGGER_THRESHOLD)"
+                                    )
+                                    detectedScore = score
+                                    listeningState.set(false)
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (ce: CancellationException) {
+                listeningState.set(false)
+                throw ce
+            } catch (e: Exception) {
+                Log.e(
+                    TAG,
+                    "Wake word AudioRecord/ONNX exception (${e.javaClass.simpleName}: ${e.message}) — restarting recording loop immediately",
+                    e
+                )
+                onStreamRecovering(e)
+                if (isListening && currentCoroutineContext().isActive) {
+                    delay(400L)
+                }
+            } finally {
+                if (recorder != null) {
+                    releaseRecorderInstance(recorder)
                 }
             }
-        } catch (ce: CancellationException) {
-            throw ce
-        } finally {
-            stopAndReleaseRecorder(recorder)
         }
 
-        // Invoke trigger callback AFTER AudioRecord has fully stopped and released the mic
+        // Invoke trigger callback AFTER AudioRecord has stopped and released the mic
         val triggered = detectedScore
         if (triggered != null) {
             onDetected(triggered)
@@ -332,29 +401,32 @@ class OpenWakeWordPipeline(context: Context) {
 
     @SuppressLint("MissingPermission")
     private fun createInitializedAudioRecord(bufferSizeInBytes: Int): AudioRecord {
-        val primary = AudioRecord(
+        val sources = intArrayOf(
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            SAMPLE_RATE_HZ,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            bufferSizeInBytes
+            MediaRecorder.AudioSource.MIC
         )
-        if (primary.state == AudioRecord.STATE_INITIALIZED) {
-            return primary
+        for (source in sources) {
+            var candidate: AudioRecord? = null
+            try {
+                candidate = AudioRecord(
+                    source,
+                    SAMPLE_RATE_HZ,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferSizeInBytes
+                )
+                if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                    return candidate
+                }
+                candidate.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "AudioRecord init failed for source=$source: ${e.message}")
+                try {
+                    candidate?.release()
+                } catch (_: Exception) {
+                }
+            }
         }
-        primary.release()
-
-        val fallback = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            SAMPLE_RATE_HZ,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            bufferSizeInBytes
-        )
-        if (fallback.state == AudioRecord.STATE_INITIALIZED) {
-            return fallback
-        }
-        fallback.release()
         throw IllegalStateException("Failed to initialize 16kHz mono 16-bit AudioRecord")
     }
 
@@ -363,7 +435,7 @@ class OpenWakeWordPipeline(context: Context) {
      * cleanly to Android's SpeechRecognizer.
      */
     fun stopAudioCapture() {
-        captureActive.set(false)
+        listeningState.set(false)
         val recorder = activeAudioRecord
         if (recorder != null) {
             try {
@@ -375,8 +447,7 @@ class OpenWakeWordPipeline(context: Context) {
         }
     }
 
-    private fun stopAndReleaseRecorder(recorder: AudioRecord) {
-        captureActive.set(false)
+    private fun releaseRecorderInstance(recorder: AudioRecord) {
         try {
             if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                 recorder.stop()

@@ -11,6 +11,7 @@ import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.ReminderSchedule
 import com.xestlab.assistant.data.model.UnreadEmailEntity
+import com.xestlab.assistant.service.TtsGreetingHelper
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
@@ -190,75 +191,22 @@ class AssistantRepository(
     }
 
     /**
-     * Builds the natural spoken summary of today's plan, greeting King Israel (or the user's
-     * saved DataStore name) warmly: "Good morning King Israel, how are you doing? Let's start with..."
+     * Builds the time-aware spoken daily briefing from Room:
+     * - Checks `Calendar.getInstance().get(Calendar.HOUR_OF_DAY)`:
+     *   - 0..11:  "Good morning, King Israel."
+     *   - 12..16: "Good afternoon, King Israel."
+     *   - 17..23: "Good evening, King Israel."
+     * - Queries Room for today's remaining tasks:
+     *   - > 0 left: "You have [X] tasks remaining. Let's focus on [First Task]. What do you want to do first?"
+     *   - 0 left:   "You have cleared all your tasks for today. Excellent work. You should rest."
      */
     suspend fun buildSpokenDailyPlan(
         overrideGreetingPrefix: String? = null,
         isWakeUpAlarm: Boolean = false
     ): String {
-        AppDatabase.ensureSeeded(db)
         val prefs = userPreferences.getSnapshot()
         val displayName = prefs.userName.ifBlank { "King Israel" }
-        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-        val greetingWord = when {
-            hour < 12 -> "Good morning"
-            hour < 17 -> "Good afternoon"
-            else -> "Good evening"
-        }
-
-        val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
-        val checklist = db.checklistDao().getAllItemsDirect()
-        val logsByItem = db.dailyLogDao().getLogsForDateDirect(todayStr).associateBy { it.itemId }
-        val unfinishedChecklist = checklist.filter { logsByItem[it.id]?.isDone != true }
-        val pendingTasks = db.itemDao().getPendingItemsDirect()
-            .filter { !it.sourceText.startsWith("web_pipeline_") }
-
-        val sb = StringBuilder()
-        when {
-            isWakeUpAlarm || hour < 12 -> {
-                sb.append("Good morning $displayName, how are you doing? ")
-            }
-            !overrideGreetingPrefix.isNullOrBlank() -> {
-                sb.append("$overrideGreetingPrefix $displayName, how are you doing? ")
-            }
-            else -> {
-                sb.append("$greetingWord $displayName, here is where we stand today. ")
-            }
-        }
-
-        if (unfinishedChecklist.isEmpty() && pendingTasks.isEmpty()) {
-            sb.append("Every single daily target and scheduled task is complete. Outstanding execution today.")
-            return sb.toString()
-        }
-
-        if (unfinishedChecklist.isNotEmpty()) {
-            sb.append("Let's start with ${unfinishedChecklist.first().title}. ")
-            if (unfinishedChecklist.size > 1) {
-                sb.append("You have ${unfinishedChecklist.size} core daily targets left on the board. ")
-            }
-        }
-
-        if (pendingTasks.isNotEmpty()) {
-            val topTask = pendingTasks.first()
-            val timeFormatted = topTask.dueAt?.let {
-                SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(it))
-            }
-            if (unfinishedChecklist.isEmpty()) {
-                sb.append("Let's start with ${topTask.title}${if (timeFormatted != null) " scheduled for $timeFormatted" else ""}. ")
-            } else if (timeFormatted != null) {
-                sb.append("Next on your schedule at $timeFormatted is ${topTask.title}. ")
-            } else {
-                sb.append("Your priority task after that is ${topTask.title}. ")
-            }
-
-            val dailyPace = topTask.computeDailyRequired()
-            if (dailyPace != null && topTask.unit != null) {
-                sb.append("Required pace is ${String.format(Locale.US, "%.0f", dailyPace)} ${topTask.unit} per day.")
-            }
-        }
-
-        return sb.toString().trim()
+        return TtsGreetingHelper.buildDynamicBriefing(db, displayName)
     }
 
     suspend fun exportJson(): String {
