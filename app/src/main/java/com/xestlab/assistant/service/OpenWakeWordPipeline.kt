@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - Pipeline stages:
  *   1. "melspectrogram.onnx" -> scaled via `(x / 10f) + 2f` into `[1, 76, 32, 1]`
  *   2. "embedding_model.onnx" -> 96-dim speech embedding into `[1, 16, 96]`
- *   3. "hey_jarvis_v0.1.onnx" -> probability score `[0.0, 1.0]`, triggering when `score > 0.5f`.
+ *   3. "hey_jarvis_v0.1.onnx" -> probability score `[0.0, 1.0]`, triggering when `score > 0.20f`.
  */
 class OpenWakeWordPipeline(context: Context) {
 
@@ -54,7 +54,7 @@ class OpenWakeWordPipeline(context: Context) {
         const val EMBEDDING_DIM = 96
         const val DEFAULT_CLASSIFIER_FRAMES = 16
 
-        const val TRIGGER_THRESHOLD = 0.5f
+        const val TRIGGER_THRESHOLD = 0.20f
     }
 
     private val appContext = context.applicationContext
@@ -147,11 +147,12 @@ class OpenWakeWordPipeline(context: Context) {
      * - Never breaks on 0/empty reads (`readCount == 0` yields briefly and continues).
      * - If any `AudioRecord` or ONNX exception occurs, catches it, logs it, releases the old
      *   `AudioRecord`, and immediately restarts recording so wake-word listening never drops out.
-     * - Only exits when `score > 0.5f` (to hand the mic to SpeechRecognizer) or when
+     * - Only exits when `score > 0.20f` (to hand the mic to SpeechRecognizer) or when
      *   [stopAudioCapture] / Coroutine cancellation explicitly stops listening.
      */
     @SuppressLint("MissingPermission")
     suspend fun runDetectionLoop(
+        triggerThreshold: Float = TRIGGER_THRESHOLD,
         onScoreUpdate: (Float) -> Unit = {},
         onStreamRecovering: (Throwable) -> Unit = {},
         onDetected: (Float) -> Unit
@@ -359,10 +360,10 @@ class OpenWakeWordPipeline(context: Context) {
 
                                 onScoreUpdate(score)
 
-                                if (score > TRIGGER_THRESHOLD) {
+                                if (score > triggerThreshold) {
                                     Log.i(
                                         TAG,
-                                        "Wake word 'Hey Jarvis' triggered! Score=$score (> $TRIGGER_THRESHOLD)"
+                                        "Wake word 'Hey Jarvis' triggered! Score=$score (> $triggerThreshold)"
                                     )
                                     detectedScore = score
                                     listeningState.set(false)

@@ -59,7 +59,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - Never breaks on empty/null reads; catches & logs any audio/ONNX exception and immediately
  *   restarts the recording loop so wake-word listening never times out or drops out.
  * - Holds a `PARTIAL_WAKE_LOCK` while active so CPU inference is never throttled when the screen dims.
- * - Executes the full Jarvis conversation loop when `score > 0.5`:
+ * - Executes the full Jarvis conversation loop when `score > 0.20`:
  *   1. Stop the AudioRecord stream.
  *   2. Play activation chime.
  *   3. Speak "Yes? What do you need?" via VoiceEngine (ElevenLabs or Android TTS fallback).
@@ -76,6 +76,7 @@ class WakeWordService : Service() {
         const val CHANNEL_ID = "xestlab_wake_word_channel"
         const val NOTIFICATION_ID = 7701
         const val ACTIVE_NOTIFICATION_TEXT = "Listening for 'Hey Jarvis'..."
+        const val WAKE_WORD_THRESHOLD = 0.20f
 
         const val ACTION_START_OR_RELOAD = "com.xestlab.assistant.action.WAKE_START_OR_RELOAD"
         const val ACTION_STOP_SERVICE = "com.xestlab.assistant.action.WAKE_STOP_SERVICE"
@@ -324,7 +325,7 @@ class WakeWordService : Service() {
 
         updateForegroundNotification(ACTIVE_NOTIFICATION_TEXT)
         updateExternalStatus(
-            "$ACTIVE_NOTIFICATION_TEXT (ONNX 3-model pipeline active, threshold > 0.5)",
+            "$ACTIVE_NOTIFICATION_TEXT (ONNX 3-model pipeline active, threshold > 0.20)",
             false
         )
 
@@ -342,6 +343,7 @@ class WakeWordService : Service() {
                 try {
                     var triggeredScore: Float? = null
                     pipeline.runDetectionLoop(
+                        triggerThreshold = WAKE_WORD_THRESHOLD,
                         onScoreUpdate = { score ->
                             if (score > peakRecentScore) {
                                 peakRecentScore = score
@@ -351,7 +353,7 @@ class WakeWordService : Service() {
                                 lastUiReportMs = now
                                 val formatted = String.format(Locale.US, "%.3f", peakRecentScore)
                                 updateExternalStatus(
-                                    "$ACTIVE_NOTIFICATION_TEXT | Peak score: $formatted (triggers > 0.500)",
+                                    "$ACTIVE_NOTIFICATION_TEXT | Peak score: $formatted (triggers > 0.20)",
                                     false
                                 )
                                 peakRecentScore = 0.0f
@@ -413,7 +415,7 @@ class WakeWordService : Service() {
     }
 
     /**
-     * Triggered when `hey_jarvis_v0.1.onnx` score > 0.5:
+     * Triggered when `hey_jarvis_v0.1.onnx` score > 0.20:
      * 1. Stop AudioRecord stream.
      * 2. Play chime.
      * 3. Speak "Yes? What do you need?" via VoiceEngine (ElevenLabs / Android TTS).
@@ -649,12 +651,31 @@ class WakeWordService : Service() {
                                 postNotifications = false
                             )
                         }
-                        val emailSummary = repository.buildUnreadEmailSpokenSummary()
-                        repository.recordTurn("ASSISTANT", emailSummary)
-                        emailSummary
+                        if (securePrefs.hasGroqKey()) {
+                            askGroqForSpokenReply(spokenCommand, userPrefs)
+                        } else {
+                            val emailSummary = repository.buildUnreadEmailSpokenSummary()
+                            repository.recordTurn("ASSISTANT", emailSummary)
+                            emailSummary
+                        }
                     }
 
-                    else -> askGroqForSpokenReply(spokenCommand, userPrefs)
+                    else -> {
+                        if (securePrefs.isImapEnabled &&
+                            securePrefs.imapUser.isNotBlank() &&
+                            securePrefs.imapPassword.isNotBlank() &&
+                            db.emailDao().getRecentUnreadDirect(1).isEmpty() &&
+                            (spokenCommand.contains("meeting", ignoreCase = true) ||
+                                spokenCommand.contains("invite", ignoreCase = true) ||
+                                spokenCommand.contains("email", ignoreCase = true))
+                        ) {
+                            EmailHelper.syncUnreadEmailsAndNotify(
+                                applicationContext,
+                                postNotifications = false
+                            )
+                        }
+                        askGroqForSpokenReply(spokenCommand, userPrefs)
+                    }
                 }
 
                 mainHandler.post {

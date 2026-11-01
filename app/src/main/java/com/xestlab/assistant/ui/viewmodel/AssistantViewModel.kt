@@ -303,8 +303,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         EmailHelper.syncUnreadEmailsAndNotify(appContext, postNotifications = false)
                         _isThinking.value = false
                     }
-                    val emailSummary = repository.buildUnreadEmailSpokenSummary()
-                    respond(emailSummary, speak = true)
+                    if (securePrefs.hasGroqKey()) {
+                        routeChatToBrainOrOffline(cleaned, prefs)
+                    } else {
+                        val emailSummary = repository.buildUnreadEmailSpokenSummary()
+                        respond(emailSummary, speak = true)
+                    }
                 }
 
                 is ParsedIntent.ReadPlan -> {
@@ -425,6 +429,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 }
 
                 is ParsedIntent.ChatOrQuestion -> {
+                    if (securePrefs.isImapEnabled &&
+                        securePrefs.imapUser.isNotBlank() &&
+                        securePrefs.imapPassword.isNotBlank() &&
+                        db.emailDao().getRecentUnreadDirect(1).isEmpty() &&
+                        (intent.query.contains("meeting", ignoreCase = true) ||
+                            intent.query.contains("invite", ignoreCase = true) ||
+                            intent.query.contains("email", ignoreCase = true))
+                    ) {
+                        _isThinking.value = true
+                        EmailHelper.syncUnreadEmailsAndNotify(appContext, postNotifications = false)
+                        _isThinking.value = false
+                    }
                     routeChatToBrainOrOffline(intent.query, prefs)
                 }
             }

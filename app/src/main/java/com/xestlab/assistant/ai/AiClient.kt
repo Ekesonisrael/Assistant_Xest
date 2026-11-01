@@ -15,6 +15,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -56,7 +57,7 @@ object AiClient {
     // const val GEMINI_MODEL = "gemini-1.5-flash-latest"
 
     const val SYSTEM_COACH_PROMPT =
-        "You are Xestlab Assistant, a supportive, intelligent, and dynamic business coach for King Israel. Keep your answers short, conversational, and varied. Never sound robotic."
+        "You are Xestlab Assistant, a sharp business coach for King Israel. You have been provided with a summary of his unread emails. Read the summary carefully. If he asks 'do I have any meetings tomorrow?', scan the email subjects for keywords like 'meeting', 'invite', or specific dates. Answer his question directly. If you don't see a meeting, explicitly say 'I checked your unread emails and I don't see any meetings for tomorrow.' Never dump the whole email list unless he asks for a summary."
 
     const val AI_BRAIN_UNREACHABLE_MESSAGE =
         "I cannot reach the AI brain right now. Check your internet or API key."
@@ -87,21 +88,44 @@ object AiClient {
     }
 
     suspend fun buildLocalContext(db: AppDatabase, prefs: UserPreferencesState): String {
-        val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+        val nowCal = Calendar.getInstance()
+        val tomorrowCal = (nowCal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1) }
+        val dayFmt = SimpleDateFormat("yyyy-MM-dd (EEEE)", Locale.getDefault())
+        val shortDateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        val emailTimeFmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+
+        val today = shortDateFmt.format(nowCal.time)
+        val todayVerbose = dayFmt.format(nowCal.time)
+        val tomorrowVerbose = dayFmt.format(tomorrowCal.time)
+
         val checklist = db.checklistDao().getAllItemsDirect()
         val logs = db.dailyLogDao().getLogsForDateDirect(today).associateBy { it.itemId }
         val pending = db.itemDao().getPendingItemsDirect()
             .filter { !it.sourceText.startsWith("web_pipeline_") }
             .take(10)
         val facts = db.factDao().getAllFactsDirect().take(12)
-        val unreadEmails = db.emailDao().getRecentUnreadDirect(5)
+        val unreadEmails = db.emailDao().getRecentUnreadDirect(20)
         val goal = db.goalDao().getGoalsDirect()
 
         return buildString {
             appendLine("User Name: ${prefs.userName.ifBlank { "King Israel" }}")
-            appendLine("Date: $today")
+            appendLine("Today's Date: $todayVerbose")
+            appendLine("Tomorrow's Date: $tomorrowVerbose")
             if (goal != null) {
                 appendLine("Annual Revenue Target: NGN ${String.format(Locale.US, "%,d", goal.yearlyGoal)}")
+            }
+            appendLine("Unread Emails Summary (${unreadEmails.size} unread):")
+            if (unreadEmails.isEmpty()) {
+                appendLine("- None (0 unread emails currently in inbox).")
+            } else {
+                unreadEmails.forEach { email ->
+                    val receivedStr = emailTimeFmt.format(Date(email.receivedAt))
+                    val snippetClean = email.snippet.replace(Regex("\\s+"), " ").trim().take(140)
+                    appendLine(
+                        "- [$receivedStr] From: ${email.sender} | Subject: ${email.subject}" +
+                            if (snippetClean.isNotEmpty()) " | Preview: $snippetClean" else ""
+                    )
+                }
             }
             appendLine("Core Daily Checklist:")
             checklist.forEach { item ->
@@ -114,15 +138,9 @@ object AiClient {
             } else {
                 pending.forEach { item ->
                     val dueStr = item.dueAt?.let {
-                        SimpleDateFormat("EEE HH:mm", Locale.getDefault()).format(Date(it))
+                        SimpleDateFormat("EEE yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(it))
                     } ?: "Unscheduled"
                     appendLine("- (${item.type}, ${item.priority}, $dueStr) ${item.title}")
-                }
-            }
-            if (unreadEmails.isNotEmpty()) {
-                appendLine("Recent Unread Emails:")
-                unreadEmails.forEach { email ->
-                    appendLine("- From ${email.sender}: ${email.subject}")
                 }
             }
             if (facts.isNotEmpty()) {

@@ -197,10 +197,17 @@ object ElevenLabsClient {
                         val rawErrorBody = response.body?.string().orEmpty()
                         val detail = extractReadableError(rawErrorBody)
                         val apiEx = ElevenLabsApiException(response.code, detail)
-                        Log.e(
-                            TAG,
-                            "ElevenLabs API error (HTTP ${response.code}, model=$modelId): $detail"
-                        )
+                        if (response.code == 402) {
+                            Log.w(
+                                TAG,
+                                "ElevenLabs HTTP 402 (free-tier library voice restriction, model=$modelId): $detail. Falling back to Android TTS (0.9x)."
+                            )
+                        } else {
+                            Log.e(
+                                TAG,
+                                "ElevenLabs API error (HTTP ${response.code}, model=$modelId): $detail"
+                            )
+                        }
                         return Result.failure(apiEx)
                     }
 

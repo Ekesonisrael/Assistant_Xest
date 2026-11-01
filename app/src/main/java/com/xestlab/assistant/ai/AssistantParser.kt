@@ -98,17 +98,15 @@ object AssistantParser {
             }
         }
 
-        // 2. Smart Email Query ("What did I get in my email today?", "unread emails", "check my email")
+        // 2. Explicit raw inbox check commands only (specific questions like "do I have any meetings tomorrow?" route to Groq)
         if (
-            lower.contains("in my email") ||
-            lower.contains("unread email") ||
-            lower.contains("new email") ||
-            lower.contains("my emails") ||
             lower == "check email" ||
             lower == "check my email" ||
+            lower == "check my emails" ||
             lower == "read my email" ||
             lower == "read my emails" ||
-            (lower.contains("email") && (lower.startsWith("what ") || lower.startsWith("any ") || lower.contains("today")))
+            lower == "what did i get in my email today" ||
+            lower == "what did i get in my email today?"
         ) {
             return ParsedIntent.CheckEmails
         }

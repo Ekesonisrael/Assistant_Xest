@@ -257,7 +257,7 @@ fun SettingsScreen(
                 )
 
                 Text(
-                    text = "100% On-Device 3-Model ONNX Pipeline: melspectrogram.onnx -> embedding_model.onnx -> hey_jarvis_v0.1.onnx (triggers when score > 0.5).",
+                    text = "100% On-Device 3-Model ONNX Pipeline: melspectrogram.onnx -> embedding_model.onnx -> hey_jarvis_v0.1.onnx (triggers when score > 0.20).",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextMutedDark
                 )

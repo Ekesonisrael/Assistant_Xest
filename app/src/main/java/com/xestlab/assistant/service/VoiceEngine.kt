@@ -244,29 +244,62 @@ class VoiceEngine(
                         }
                     },
                     onFailure = { err ->
-                        val reason = formatElevenLabsError(err)
-                        Log.e(
-                            TAG,
-                            "ElevenLabs TTS failed ($reason). Falling back to Android TTS.",
-                            err
-                        )
-                        updateExternalDiagnostic(
-                            "$reason -> Fell back to Android TTS.",
-                            isError = true
-                        )
-                        speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
+                        val isFreeTier402 = (err is ElevenLabsApiException && err.statusCode == 402) ||
+                            (err.message?.contains("402") == true)
+
+                        if (isFreeTier402) {
+                            Log.w(
+                                TAG,
+                                "ElevenLabs returned 402 on free tier (${err.message}). Silently falling back to Android TTS (0.9x)."
+                            )
+                            updateExternalDiagnostic(
+                                "Using Android TTS (0.9x natural voice — ElevenLabs free-tier fallback active).",
+                                isError = false
+                            )
+                            speakViaAndroidTts(cleanText, DEFAULT_FALLBACK_RATE, onComplete)
+                        } else {
+                            val reason = formatElevenLabsError(err)
+                            Log.e(
+                                TAG,
+                                "ElevenLabs TTS failed ($reason). Falling back to Android TTS (0.9x).",
+                                err
+                            )
+                            updateExternalDiagnostic(
+                                "$reason -> Fell back to Android TTS (0.9x).",
+                                isError = false
+                            )
+                            speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
+                        }
                     }
                 )
             } catch (ce: CancellationException) {
                 throw ce
             } catch (e: Exception) {
-                val reason = formatElevenLabsError(e)
-                Log.e(TAG, "Unexpected ElevenLabs routing error ($reason). Falling back to Android TTS.", e)
-                updateExternalDiagnostic(
-                    "$reason -> Fell back to Android TTS.",
-                    isError = true
-                )
-                speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
+                val isFreeTier402 = (e is ElevenLabsApiException && e.statusCode == 402) ||
+                    (e.message?.contains("402") == true)
+                if (isFreeTier402) {
+                    Log.w(
+                        TAG,
+                        "Caught ElevenLabs 402 on free tier (${e.message}). Silently falling back to Android TTS (0.9x)."
+                    )
+                    updateExternalDiagnostic(
+                        "Using Android TTS (0.9x natural voice — ElevenLabs free-tier fallback active).",
+                        isError = false
+                    )
+                    speakViaAndroidTts(cleanText, DEFAULT_FALLBACK_RATE, onComplete)
+                } else {
+                    val reason = formatElevenLabsError(e)
+                    Log.e(
+                        TAG,
+                        "Unexpected ElevenLabs routing error ($reason). Falling back to Android TTS (0.9x).",
+                        e
+                    )
+                    updateExternalDiagnostic(
+                        "$reason -> Fell back to Android TTS (0.9x).",
+                        isError = false
+                    )
+                    speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
+                }
             }
         }
     }
