@@ -1,0 +1,2457 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Abuja Studio Goal Tracker</title>
+    <meta name="description" content="Honest revenue and activity goal tracker for an Abuja studio targeting ₦10,000,000." />
+    <meta property="og:title" content="Abuja Studio Goal Tracker" />
+    <meta property="og:description" content="Honest revenue and activity goal tracker for an Abuja studio targeting ₦10,000,000." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <style>
+      :root {
+        --bg: #F7F7F5;
+        --surface: #FFFFFF;
+        --surface-subtle: #EFEFEA;
+        --border: #E0E0DC;
+        --text: #1A1A1A;
+        --text-muted: #666666;
+        --accent: #0F5F5C;
+        --accent-subtle: #E6F0EF;
+        --accent-contrast: #FFFFFF;
+        --warning: #B3261E;
+        --warning-subtle: #FDF2F1;
+        --success: #0F5F5C;
+        --success-subtle: #E6F0EF;
+        --radius: 8px;
+        --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #141413;
+          --surface: #1E1E1C;
+          --surface-subtle: #272725;
+          --border: #333330;
+          --text: #F2F2F0;
+          --text-muted: #9E9E99;
+          --accent: #2BA5A0;
+          --accent-subtle: #162B2A;
+          --accent-contrast: #0A1C1B;
+          --warning: #E05349;
+          --warning-subtle: #2E1513;
+          --success: #2BA5A0;
+          --success-subtle: #162B2A;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: var(--font);
+        background-color: var(--bg);
+        color: var(--text);
+        line-height: 1.45;
+        -webkit-font-smoothing: antialiased;
+        padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+        min-height: 100vh;
+      }
+
+      .app-container {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 16px 16px 24px 16px;
+      }
+
+      /* Header */
+      .app-header {
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 16px;
+        margin-bottom: 24px;
+      }
+
+      .brand-title {
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        color: var(--text);
+        margin-bottom: 4px;
+      }
+
+      .brand-subtitle {
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+
+      /* Screens & Navigation */
+      .screen-view {
+        display: none;
+        transition: opacity 120ms ease;
+      }
+
+      .screen-view.active {
+        display: block;
+      }
+
+      .bottom-nav {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+        display: flex;
+        justify-content: space-around;
+        align-items: center;
+        height: 56px;
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        z-index: 100;
+      }
+
+      .nav-btn {
+        flex: 1;
+        height: 100%;
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        font-family: var(--font);
+        font-size: 11px;
+        font-weight: 500;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        cursor: pointer;
+        border-top: 3px solid transparent;
+        transition: color 120ms ease, border-color 120ms ease;
+        padding: 0 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .nav-btn:hover {
+        color: var(--text);
+      }
+
+      .nav-btn.active {
+        color: var(--accent);
+        font-weight: 700;
+        border-top: 3px solid var(--accent);
+      }
+
+      /* Cards & Surfaces */
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+
+      .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+
+      .card-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .card-subtitle {
+        font-size: 13px;
+        color: var(--text-muted);
+        margin-top: 2px;
+      }
+
+      /* Typography & Stats */
+      .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+      }
+
+      @media (max-width: 420px) {
+        .stat-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .stat-item {
+        background: var(--surface-subtle);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px;
+      }
+
+      .stat-label {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .stat-value {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--text);
+        letter-spacing: -0.01em;
+      }
+
+      .stat-subtext {
+        font-size: 12px;
+        margin-top: 4px;
+      }
+
+      /* Status Labels */
+      .status-text {
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .status-ontrack, .status-ahead {
+        color: var(--success);
+      }
+
+      .status-behind {
+        color: var(--warning);
+      }
+
+      /* Form controls */
+      .form-group {
+        margin-bottom: 16px;
+      }
+
+      .form-group:last-child {
+        margin-bottom: 0;
+      }
+
+      .form-label {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+        margin-bottom: 6px;
+      }
+
+      .form-hint {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: 8px;
+      }
+
+      .input-text, .input-number, .input-date, select {
+        width: 100%;
+        height: 44px;
+        padding: 0 12px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        color: var(--text);
+        font-family: var(--font);
+        font-size: 14px;
+        transition: border-color 120ms ease;
+      }
+
+      .input-text:focus, .input-number:focus, .input-date:focus, select:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+
+      /* Buttons */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 44px;
+        padding: 0 16px;
+        font-family: var(--font);
+        font-size: 14px;
+        font-weight: 600;
+        border-radius: var(--radius);
+        border: 1px solid transparent;
+        cursor: pointer;
+        transition: background-color 120ms ease, opacity 120ms ease;
+        text-decoration: none;
+        width: 100%;
+      }
+
+      .btn-primary {
+        background: var(--accent);
+        color: var(--accent-contrast);
+      }
+
+      .btn-primary:hover {
+        opacity: 0.92;
+      }
+
+      .btn-secondary {
+        background: var(--surface-subtle);
+        border-color: var(--border);
+        color: var(--text);
+      }
+
+      .btn-secondary:hover {
+        background: var(--border);
+      }
+
+      .btn-outline {
+        background: transparent;
+        border-color: var(--border);
+        color: var(--text);
+      }
+
+      .btn-outline:hover {
+        border-color: var(--text);
+      }
+
+      .btn-danger {
+        background: transparent;
+        border-color: var(--warning);
+        color: var(--warning);
+      }
+
+      .btn-danger:hover {
+        background: var(--warning-subtle);
+      }
+
+      .btn-sm {
+        height: 30px;
+        padding: 0 10px;
+        font-size: 12px;
+        width: auto;
+      }
+
+      .button-row {
+        display: flex;
+        gap: 8px;
+        margin-top: 16px;
+      }
+
+      @media (max-width: 480px) {
+        .button-row {
+          flex-direction: column;
+        }
+      }
+
+      /* Checklist */
+      .checklist {
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .checklist-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 12px;
+        background: var(--surface-subtle);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        cursor: pointer;
+        min-height: 48px;
+      }
+
+      .checklist-item input[type="checkbox"] {
+        width: 22px;
+        height: 22px;
+        margin-top: 1px;
+        accent-color: var(--accent);
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+
+      .checklist-label {
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--text);
+        cursor: pointer;
+        user-select: none;
+        flex: 1;
+        line-height: 1.4;
+      }
+
+      .checklist-item.done {
+        border-color: var(--border);
+        opacity: 0.8;
+      }
+
+      .checklist-item.done .checklist-label {
+        text-decoration: line-through;
+        color: var(--text-muted);
+      }
+
+      /* Progress Bar */
+      .progress-track {
+        width: 100%;
+        height: 10px;
+        background: var(--surface-subtle);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+        margin: 12px 0 8px 0;
+      }
+
+      .progress-track.thin {
+        height: 6px;
+        margin: 8px 0 0 0;
+      }
+
+      .progress-fill {
+        height: 100%;
+        background: var(--accent);
+        transition: width 160ms ease;
+      }
+
+      /* Summary List */
+      .summary-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .summary-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 12px;
+        background: var(--surface-subtle);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        font-size: 13px;
+      }
+
+      .summary-row-title {
+        font-weight: 500;
+        color: var(--text);
+      }
+
+      .summary-row-data {
+        text-align: right;
+      }
+
+      .summary-row-val {
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      /* Empty State */
+      .empty-state {
+        padding: 24px 16px;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 13px;
+        background: var(--surface-subtle);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        margin-bottom: 16px;
+      }
+
+      /* Toast Notification */
+      .toast {
+        position: fixed;
+        bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--text);
+        color: var(--bg);
+        padding: 10px 16px;
+        border-radius: var(--radius);
+        font-size: 13px;
+        font-weight: 500;
+        z-index: 200;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 160ms ease;
+      }
+
+      .toast.visible {
+        opacity: 1;
+      }
+
+      /* Nav header for week / month */
+      .period-selector {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+
+      .period-title {
+        font-size: 16px;
+        font-weight: 700;
+        text-align: center;
+        flex: 1;
+      }
+
+      .period-btn {
+        width: 44px;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        cursor: pointer;
+        color: var(--text);
+        font-weight: 700;
+        font-family: var(--font);
+      }
+
+      .period-btn:hover {
+        background: var(--surface-subtle);
+      }
+
+      /* Plain sentence callout */
+      .verdict-callout {
+        padding: 14px 16px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background: var(--surface-subtle);
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 16px;
+      }
+
+      .verdict-ontrack, .verdict-ahead {
+        border-left: 4px solid var(--accent);
+      }
+
+      .verdict-behind {
+        border-left: 4px solid var(--warning);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-container">
+      <header class="app-header">
+        <h1 class="brand-title">Abuja Studio Goal Tracker</h1>
+        <p class="brand-subtitle">Goal: ₦10,000,000 revenue (1 Nov 2026 - 31 Oct 2027)</p>
+      </header>
+
+      <!-- TODAY SCREEN -->
+      <section id="screen-today" class="screen-view active">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title" id="today-date-string">Today</div>
+              <div class="card-subtitle">Daily execution routine</div>
+            </div>
+            <div style="text-align: right;">
+              <span class="status-text" id="today-streak-display">0 day streak</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="today-messages-input">Outreach messages sent today</label>
+            <div class="form-hint">Counts directly toward this week's 50 message target</div>
+            <div style="display: flex; gap: 8px;">
+              <input type="number" id="today-messages-input" class="input-number" min="0" value="0" style="flex: 1;" />
+              <button id="today-messages-add10" class="btn btn-secondary" style="width: auto; white-space: nowrap;">+10</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Daily Checklist</div>
+              <div class="card-subtitle">Synchronised directly with Pipeline daily execution</div>
+            </div>
+            <div class="card-subtitle" id="checklist-counter" style="font-weight: 600; color: var(--text);">0 / 5 done</div>
+          </div>
+
+          <ul class="checklist" id="today-checklist">
+            <li class="checklist-item" data-item="messages10">
+              <input type="checkbox" id="check-messages10" />
+              <label class="checklist-label" for="check-messages10">10 personalised WhatsApp messages sent, each naming one specific thing on their page or site</label>
+            </li>
+            <li class="checklist-item" data-item="followups">
+              <input type="checkbox" id="check-followups" />
+              <label class="checklist-label" for="check-followups">Every follow-up due today sent</label>
+            </li>
+            <li class="checklist-item" data-item="leadsheet">
+              <input type="checkbox" id="check-leadsheet" />
+              <label class="checklist-label" for="check-leadsheet">Lead sheet updated, next action set for each lead</label>
+            </li>
+            <li class="checklist-item" data-item="content">
+              <input type="checkbox" id="check-content" />
+              <label class="checklist-label" for="check-content">One content piece posted: process, mistake and fix, or package explained</label>
+            </li>
+            <li class="checklist-item" data-item="study">
+              <input type="checkbox" id="check-study" />
+              <label class="checklist-label" for="check-study">One study block done</label>
+            </li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Day Focus and Notes</div>
+            <div class="card-subtitle">Saved automatically</div>
+          </div>
+          <div class="form-group">
+            <input type="text" id="today-note-input" class="input-text" placeholder="Key wins, blockers, or priorities for today" />
+          </div>
+        </div>
+      </section>
+
+      <!-- WEEK SCREEN -->
+      <section id="screen-week" class="screen-view">
+        <div class="period-selector">
+          <button id="week-prev-btn" class="period-btn" aria-label="Previous week">&lt;</button>
+          <div class="period-title" id="week-label">Week 1</div>
+          <button id="week-next-btn" class="period-btn" aria-label="Next week">&gt;</button>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Weekly Scorecard</div>
+              <div class="card-subtitle" id="week-date-range">1 Nov 2026 - 7 Nov 2026</div>
+            </div>
+            <button id="week-jump-current" class="btn btn-outline" style="width: auto; height: 32px; font-size: 12px; padding: 0 10px;">This Week</button>
+          </div>
+
+          <div class="summary-list" id="week-scorecard-list">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Log Numbers for This Week</div>
+            <div class="card-subtitle">Edit any field to save</div>
+          </div>
+
+          <div class="stat-grid" style="margin-bottom: 12px;">
+            <div class="form-group">
+              <label class="form-label" for="log-week-messages">Messages</label>
+              <input type="number" id="log-week-messages" class="input-number" min="0" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-week-conversations">Conversations</label>
+              <input type="number" id="log-week-conversations" class="input-number" min="0" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-week-quotes">Quotes sent</label>
+              <input type="number" id="log-week-quotes" class="input-number" min="0" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-week-websites">Websites closed</label>
+              <input type="number" id="log-week-websites" class="input-number" min="0" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-week-retainers">Retainers signed</label>
+              <input type="number" id="log-week-retainers" class="input-number" min="0" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-week-cash">Cash received (₦)</label>
+              <input type="number" id="log-week-cash" class="input-number" min="0" step="5000" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-week-study">Study hours</label>
+              <input type="number" id="log-week-study" class="input-number" min="0" step="0.5" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-week-sideproduct">Side product hours</label>
+              <input type="number" id="log-week-sideproduct" class="input-number" min="0" step="0.5" value="0" />
+            </div>
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button id="btn-copy-sunday-review" class="btn btn-secondary">Copy Sunday review</button>
+          <button id="btn-copy-ai-prompt-week" class="btn btn-primary">Copy AI prompt</button>
+        </div>
+      </section>
+
+      <!-- MONTH SCREEN -->
+      <section id="screen-month" class="screen-view">
+        <div class="period-selector">
+          <button id="month-prev-btn" class="period-btn" aria-label="Previous month">&lt;</button>
+          <div class="period-title" id="month-label">November 2026</div>
+          <button id="month-next-btn" class="period-btn" aria-label="Next month">&gt;</button>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Monthly Plan vs Actual</div>
+              <div class="card-subtitle" id="month-plan-subtitle">Month 1 of 12</div>
+            </div>
+            <span class="status-text" id="month-overall-status">On track</span>
+          </div>
+
+          <div class="summary-list" id="month-comparison-list">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Run Rate and Year-End Forecast</div>
+            <div class="card-subtitle">Based on months logged so far</div>
+          </div>
+
+          <div class="stat-grid">
+            <div class="stat-item">
+              <div class="stat-label">Monthly Run Rate</div>
+              <div class="stat-value" id="month-run-rate-val">₦0</div>
+              <div class="stat-subtext" id="month-run-rate-sub">Average per logged month</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Year-End Forecast</div>
+              <div class="stat-value" id="month-forecast-val">₦0</div>
+              <div class="stat-subtext" id="month-forecast-sub">Goal: ₦10,000,000</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Log Numbers for This Month</div>
+            <div class="card-subtitle">Edit any field to save</div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="log-month-revenue">Revenue received (₦)</label>
+            <input type="number" id="log-month-revenue" class="input-number" min="0" step="5000" value="0" />
+          </div>
+
+          <div class="stat-grid">
+            <div class="form-group">
+              <label class="form-label" for="log-month-websites">Websites closed</label>
+              <input type="number" id="log-month-websites" class="input-number" min="0" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-month-retainers-active">Active retainers</label>
+              <input type="number" id="log-month-retainers-active" class="input-number" min="0" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-month-retainers-lost">Retainers lost (churn)</label>
+              <input type="number" id="log-month-retainers-lost" class="input-number" min="0" value="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="log-month-open-quotes">Open quotes</label>
+              <input type="number" id="log-month-open-quotes" class="input-number" min="0" value="0" />
+            </div>
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button id="btn-copy-monthly-review" class="btn btn-secondary">Copy monthly review</button>
+          <button id="btn-copy-ai-prompt-month" class="btn btn-primary">Copy AI prompt</button>
+        </div>
+      </section>
+
+      <!-- YEAR SCREEN -->
+      <section id="screen-year" class="screen-view">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Year Progress (Nov 2026 - Oct 2027)</div>
+              <div class="card-subtitle">Target: ₦10,000,000</div>
+            </div>
+            <div class="stat-value" id="year-percent-val" style="font-size: 18px;">0.0%</div>
+          </div>
+
+          <div class="progress-track">
+            <div class="progress-fill" id="year-progress-fill" style="width: 0%;"></div>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+            <span>Logged: <strong id="year-total-logged-text" style="color: var(--text);">₦0</strong></span>
+            <span>Target: ₦10,000,000</span>
+          </div>
+
+          <!-- Plain honest verdict sentence -->
+          <div class="verdict-callout verdict-behind" id="year-verdict-sentence">
+            Nothing logged yet. You are behind plan by ₦0 based on the expected pace to date.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Quarter Breakdown</div>
+            <div class="card-subtitle">Actual versus target</div>
+          </div>
+
+          <div class="summary-list" id="year-quarter-list">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Months Logged at a Glance</div>
+            <div class="card-subtitle">12-month summary</div>
+          </div>
+          <div class="summary-list" id="year-month-summary-list">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+      </section>
+
+      <!-- PIPELINE SCREEN -->
+      <section id="screen-pipeline" class="screen-view">
+        <div class="card">
+          <div class="card-header" style="margin-bottom: 8px;">
+            <div>
+              <div class="card-title">Sales and Delivery Playbook</div>
+              <div class="card-subtitle">Standard operating checklists for studio operations</div>
+            </div>
+            <div style="text-align: right;">
+              <span class="status-text status-ontrack" id="pipeline-total-counter" style="font-size: 14px;">0 of 34 done</span>
+            </div>
+          </div>
+
+          <div class="progress-track thin">
+            <div class="progress-fill" id="pipeline-progress-fill" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- LIST 1 -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">1. Set up once</div>
+              <div class="card-subtitle">Do these before the next quote goes out.</div>
+            </div>
+            <span class="status-text" id="counter-pipeline-setup">0/10</span>
+          </div>
+          <ul class="checklist" id="list-pipeline-setup">
+            <!-- Rendered by JS -->
+          </ul>
+        </div>
+
+        <!-- LIST 2 -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">2. Every day</div>
+              <div class="card-subtitle">Resets so you can reuse it tomorrow.</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="status-text" id="counter-pipeline-everyday">0/4</span>
+              <button id="btn-reset-everyday" class="btn btn-outline btn-sm">Reset</button>
+            </div>
+          </div>
+          <ul class="checklist" id="list-pipeline-everyday">
+            <!-- Rendered by JS -->
+          </ul>
+        </div>
+
+        <!-- LIST 3 -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">3. Follow-up cadence per lead</div>
+              <div class="card-subtitle">Reset for each new lead. Stop after day 10.</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="status-text" id="counter-pipeline-followup">0/4</span>
+              <button id="btn-reset-followup" class="btn btn-outline btn-sm">Reset</button>
+            </div>
+          </div>
+          <ul class="checklist" id="list-pipeline-followup">
+            <!-- Rendered by JS -->
+          </ul>
+        </div>
+
+        <!-- LIST 4 -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">4. Sales conversation per lead</div>
+              <div class="card-subtitle">Reset for each new lead.</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="status-text" id="counter-pipeline-sales">0/5</span>
+              <button id="btn-reset-sales" class="btn btn-outline btn-sm">Reset</button>
+            </div>
+          </div>
+          <ul class="checklist" id="list-pipeline-sales">
+            <!-- Rendered by JS -->
+          </ul>
+        </div>
+
+        <!-- LIST 5 -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">5. Onboarding per client</div>
+              <div class="card-subtitle">Reset for each new client.</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="status-text" id="counter-pipeline-onboarding">0/6</span>
+              <button id="btn-reset-onboarding" class="btn btn-outline btn-sm">Reset</button>
+            </div>
+          </div>
+          <ul class="checklist" id="list-pipeline-onboarding">
+            <!-- Rendered by JS -->
+          </ul>
+        </div>
+
+        <!-- LIST 6 -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">6. After delivery per client</div>
+              <div class="card-subtitle">Reset for each new client.</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="status-text" id="counter-pipeline-afterdelivery">0/5</span>
+              <button id="btn-reset-afterdelivery" class="btn btn-outline btn-sm">Reset</button>
+            </div>
+          </div>
+          <ul class="checklist" id="list-pipeline-afterdelivery">
+            <!-- Rendered by JS -->
+          </ul>
+        </div>
+
+        <div style="margin-top: 16px; margin-bottom: 24px;">
+          <button id="btn-pipeline-clear-all" class="btn btn-danger">Clear everything</button>
+        </div>
+      </section>
+
+      <!-- SETTINGS SCREEN -->
+      <section id="screen-settings" class="screen-view">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Targets and Strategy</div>
+              <div class="card-subtitle">Saved automatically in local storage</div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-year-goal">Year Revenue Goal (₦)</label>
+            <input type="number" id="setting-year-goal" class="input-number" min="0" step="50000" />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-start-date">Start Date</label>
+            <input type="date" id="setting-start-date" class="input-date" />
+          </div>
+
+          <div style="font-weight: 600; font-size: 13px; margin: 16px 0 8px 0; color: var(--text);">Service Pricing (₦)</div>
+          <div class="stat-grid">
+            <div class="form-group">
+              <label class="form-label" for="setting-price-website">Website project</label>
+              <input type="number" id="setting-price-website" class="input-number" min="0" step="5000" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-price-retainer">Retainer per month</label>
+              <input type="number" id="setting-price-retainer" class="input-number" min="0" step="5000" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-price-maint">Maintenance per month</label>
+              <input type="number" id="setting-price-maint" class="input-number" min="0" step="1000" />
+            </div>
+          </div>
+
+          <div style="font-weight: 600; font-size: 13px; margin: 16px 0 8px 0; color: var(--text);">Plan Targets</div>
+          <div class="stat-grid">
+            <div class="form-group">
+              <label class="form-label" for="setting-target-websites-month">Websites closed / month</label>
+              <input type="number" id="setting-target-websites-month" class="input-number" min="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-target-retainers-month">New retainers / month</label>
+              <input type="number" id="setting-target-retainers-month" class="input-number" min="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-target-retainers-cap">Active retainers cap</label>
+              <input type="number" id="setting-target-retainers-cap" class="input-number" min="0" />
+            </div>
+          </div>
+
+          <div style="font-weight: 600; font-size: 13px; margin: 16px 0 8px 0; color: var(--text);">Weekly Activity Targets</div>
+          <div class="stat-grid">
+            <div class="form-group">
+              <label class="form-label" for="setting-target-messages">Outreach messages</label>
+              <input type="number" id="setting-target-messages" class="input-number" min="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-target-conversations">Conversations</label>
+              <input type="number" id="setting-target-conversations" class="input-number" min="0" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-target-quotes">Quotes sent</label>
+              <input type="number" id="setting-target-quotes" class="input-number" min="0" />
+            </div>
+          </div>
+
+          <div style="font-weight: 600; font-size: 13px; margin: 16px 0 8px 0; color: var(--text);">Quarter Revenue Targets (₦)</div>
+          <div class="stat-grid">
+            <div class="form-group">
+              <label class="form-label" for="setting-target-q1">Q1 (Nov - Jan)</label>
+              <input type="number" id="setting-target-q1" class="input-number" min="0" step="50000" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-target-q2">Q2 (Feb - Apr)</label>
+              <input type="number" id="setting-target-q2" class="input-number" min="0" step="50000" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-target-q3">Q3 (May - Jul)</label>
+              <input type="number" id="setting-target-q3" class="input-number" min="0" step="50000" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-target-q4">Q4 (Aug - Oct)</label>
+              <input type="number" id="setting-target-q4" class="input-number" min="0" step="50000" />
+            </div>
+          </div>
+
+          <div style="margin-top: 16px;">
+            <button id="btn-save-settings" class="btn btn-primary">Save settings</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Backup and Restore</div>
+              <div class="card-subtitle">Export or import your logged records</div>
+            </div>
+          </div>
+
+          <div class="button-row">
+            <button id="btn-export-json" class="btn btn-secondary">Export JSON</button>
+            <button id="btn-import-trigger" class="btn btn-secondary">Import JSON</button>
+            <input type="file" id="input-import-file" accept=".json" style="display: none;" />
+          </div>
+
+          <div style="margin-top: 16px;">
+            <button id="btn-reset-defaults" class="btn btn-danger">Reset to default targets</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Bottom Navigation Bar -->
+    <nav class="bottom-nav">
+      <button class="nav-btn active" data-tab="today">Today</button>
+      <button class="nav-btn" data-tab="week">Week</button>
+      <button class="nav-btn" data-tab="month">Month</button>
+      <button class="nav-btn" data-tab="year">Year</button>
+      <button class="nav-btn" data-tab="pipeline">Pipeline</button>
+      <button class="nav-btn" data-tab="settings">Settings</button>
+    </nav>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">Copied to clipboard</div>
+
+    <!-- Application Logic (Vanilla JS) -->
+    <script>
+      (function() {
+        'use strict';
+
+        var STORAGE_KEY = 'abuja_studio_goal_tracker_v1';
+
+        var PIPELINE_DEFINITIONS = {
+          setupOnce: {
+            title: 'Set up once',
+            note: 'Do these before the next quote goes out.',
+            canReset: false,
+            items: [
+              'Website tiers written: landing page, business site, e-commerce. Page and revision caps set',
+              'Monthly plan written: maintenance and hosting, with social media and ads as the upgrade',
+              'One-page agreement: 50-70% deposit, balance before handover, revision limit',
+              'Quote template made: middle tier highlighted, valid 7 days',
+              'Pricing page on the site, matching PDF, naira and dollar versions',
+              'Intake form built: brand assets, content, references, domain access',
+              'Lead sheet created: name, source, stage, last contact, next action, referrer',
+              'Ad results and screenshots pulled together',
+              '3 case studies written: problem, what you built, result with numbers',
+              'Testimonial ask saved: what was the problem, what changed, would you recommend me'
+            ]
+          },
+          everyDay: {
+            title: 'Every day',
+            note: 'Resets so you can reuse it tomorrow.',
+            canReset: true,
+            items: [
+              '10 personalised WhatsApp messages sent, each naming one specific thing on their page or site',
+              'Every follow-up due today sent',
+              'Lead sheet updated, next action set for each lead',
+              'One content piece posted: process, mistake and fix, or package explained'
+            ]
+          },
+          followUpCadence: {
+            title: 'Follow-up cadence per lead',
+            note: 'Reset for each new lead. Stop after day 10.',
+            canReset: true,
+            items: [
+              'Day 0: personalised message sent',
+              'Day 2: call or voice note, plus one useful tip',
+              'Day 5: relevant example sent',
+              'Day 10: polite close-out sent'
+            ]
+          },
+          salesConversation: {
+            title: 'Sales conversation per lead',
+            note: 'Reset for each new lead.',
+            canReset: true,
+            items: [
+              '15-minute chat: what they sell, what the site must do, what they have now, budget, deadline',
+              'Tailored quote sent within 24 hours',
+              'Quote follow-up on day 2',
+              'Quote follow-up on day 5',
+              'Agreement signed and deposit received'
+            ]
+          },
+          onboarding: {
+            title: 'Onboarding per client',
+            note: 'Reset for each new client.',
+            canReset: true,
+            items: [
+              'Intake form returned',
+              'Kickoff message sent with timeline and one communication channel',
+              'Deadline padded, early delivery planned',
+              'Milestone preview shared',
+              'Revision limit explained and sign-off received in writing',
+              'Balance paid, then files and domain handed over'
+            ]
+          },
+          afterDelivery: {
+            title: 'After delivery per client',
+            note: 'Reset for each new client.',
+            canReset: true,
+            items: [
+              '30-day check-in sent',
+              'Social media and ads plan pitched',
+              'Testimonial asked, with permission to use it',
+              'Referral asked and referrer logged',
+              'Result recorded for a case study'
+            ]
+          }
+        };
+
+        var DEFAULT_STATE = {
+          settings: {
+            yearGoal: 10000000,
+            startDate: '2026-11-01',
+            prices: {
+              website: 150000,
+              retainerMonthly: 80000,
+              maintenanceMonthly: 15000
+            },
+            planTargets: {
+              websitesPerMonth: 2,
+              newRetainersPerMonth: 1,
+              activeRetainersCap: 8
+            },
+            weeklyTargets: {
+              messages: 50,
+              conversations: 5,
+              quotes: 3
+            },
+            quarterTargets: {
+              q1: 1500000,
+              q2: 2400000,
+              q3: 3200000,
+              q4: 3500000
+            }
+          },
+          days: {},
+          weeks: {},
+          months: {},
+          pipeline: {
+            setupOnce: [false, false, false, false, false, false, false, false, false, false],
+            everyDay: [false, false, false, false],
+            followUpCadence: [false, false, false, false],
+            salesConversation: [false, false, false, false, false],
+            onboarding: [false, false, false, false, false, false],
+            afterDelivery: [false, false, false, false, false]
+          }
+        };
+
+        var appState = null;
+        var selectedWeekIndex = 1; // 1 to 52
+        var selectedMonthIndex = 0; // 0 (Nov 2026) to 11 (Oct 2027)
+
+        var MONTH_KEYS = [
+          '2026-11', '2026-12', '2027-01', '2027-02',
+          '2027-03', '2027-04', '2027-05', '2027-06',
+          '2027-07', '2027-08', '2027-09', '2027-10'
+        ];
+
+        var MONTH_NAMES = [
+          'November 2026', 'December 2026', 'January 2027', 'February 2027',
+          'March 2027', 'April 2027', 'May 2027', 'June 2027',
+          'July 2027', 'August 2027', 'September 2027', 'October 2027'
+        ];
+
+        // Format money as ₦ with thousands separators
+        function formatNaira(num) {
+          var val = Number(num) || 0;
+          return '₦' + val.toLocaleString('en-NG');
+        }
+
+        // Storage load and save
+        function loadState() {
+          try {
+            var raw = localStorage.getItem(STORAGE_KEY);
+            if (raw) {
+              var parsed = JSON.parse(raw);
+              if (parsed && typeof parsed === 'object') {
+                return mergeDeep(JSON.parse(JSON.stringify(DEFAULT_STATE)), parsed);
+              }
+            }
+          } catch (e) {
+            console.warn('Storage unavailable or corrupted, using in-memory state', e);
+          }
+          return JSON.parse(JSON.stringify(DEFAULT_STATE));
+        }
+
+        function saveState() {
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+          } catch (e) {
+            console.warn('Unable to persist to storage', e);
+          }
+        }
+
+        function mergeDeep(target, source) {
+          for (var key in source) {
+            if (source.hasOwnProperty(key)) {
+              if (Array.isArray(source[key])) {
+                target[key] = source[key].slice();
+              } else if (source[key] && typeof source[key] === 'object') {
+                target[key] = mergeDeep(target[key] || {}, source[key]);
+              } else {
+                target[key] = source[key];
+              }
+            }
+          }
+          return target;
+        }
+
+        function showToast(msg) {
+          var toast = document.getElementById('toast');
+          if (!toast) return;
+          toast.textContent = msg;
+          toast.classList.add('visible');
+          setTimeout(function() {
+            toast.classList.remove('visible');
+          }, 2400);
+        }
+
+        function copyToClipboard(text, successMsg) {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function() {
+              showToast(successMsg || 'Copied to clipboard');
+            }).catch(function() {
+              fallbackCopy(text, successMsg);
+            });
+          } else {
+            fallbackCopy(text, successMsg);
+          }
+        }
+
+        function fallbackCopy(text, successMsg) {
+          var textArea = document.createElement('textarea');
+          textArea.value = text;
+          textArea.style.position = 'fixed';
+          textArea.style.opacity = '0';
+          document.body.appendChild(textArea);
+          textArea.focus();
+          textArea.select();
+          try {
+            document.execCommand('copy');
+            showToast(successMsg || 'Copied to clipboard');
+          } catch (err) {
+            showToast('Failed to copy. Please copy manually.');
+          }
+          document.body.removeChild(textArea);
+        }
+
+        // Date Helpers
+        function getTodayDateString() {
+          var d = new Date();
+          var year = d.getFullYear();
+          var month = String(d.getMonth() + 1).padStart(2, '0');
+          var day = String(d.getDate()).padStart(2, '0');
+          return year + '-' + month + '-' + day;
+        }
+
+        function getStartDateTime() {
+          var s = appState.settings.startDate || '2026-11-01';
+          var parts = s.split('-');
+          return new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+        }
+
+        function getCurrentWeekNumber() {
+          var start = getStartDateTime();
+          var now = new Date();
+          var diffMs = now.getTime() - start.getTime();
+          if (diffMs < 0) return 1;
+          var diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+          var weekNum = Math.floor(diffDays / 7) + 1;
+          if (weekNum < 1) weekNum = 1;
+          if (weekNum > 52) weekNum = 52;
+          return weekNum;
+        }
+
+        function getWeekDateRange(weekNum) {
+          var start = getStartDateTime();
+          var weekStart = new Date(start.getTime() + (weekNum - 1) * 7 * 24 * 60 * 60 * 1000);
+          var weekEnd = new Date(weekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
+
+          function fmt(d) {
+            var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            return d.getDate() + ' ' + months[d.getMonth()] + ' ' + d.getFullYear();
+          }
+
+          return fmt(weekStart) + ' - ' + fmt(weekEnd);
+        }
+
+        function getWeekKey(weekNum) {
+          return 'W' + weekNum;
+        }
+
+        function getWeekRecord(weekNum) {
+          var key = getWeekKey(weekNum);
+          if (!appState.weeks[key]) {
+            appState.weeks[key] = {
+              messages: 0,
+              conversations: 0,
+              quotes: 0,
+              websites: 0,
+              retainers: 0,
+              cashReceived: 0,
+              studyHours: 0,
+              sideProductHours: 0
+            };
+          }
+          return appState.weeks[key];
+        }
+
+        function getMonthKey(idx) {
+          return MONTH_KEYS[idx] || MONTH_KEYS[0];
+        }
+
+        function getMonthRecord(idx) {
+          var key = getMonthKey(idx);
+          if (!appState.months[key]) {
+            appState.months[key] = {
+              revenueReceived: 0,
+              websitesClosed: 0,
+              activeRetainers: 0,
+              retainersLost: 0,
+              openQuotes: 0
+            };
+          }
+          return appState.months[key];
+        }
+
+        function getDayRecord(dateStr) {
+          if (!appState.days[dateStr]) {
+            appState.days[dateStr] = {
+              studyDone: false,
+              messagesSent: 0,
+              note: ''
+            };
+          }
+          return appState.days[dateStr];
+        }
+
+        // Streak Calculation
+        function calculateStreak() {
+          var streak = 0;
+          var d = new Date();
+          var todayStr = getTodayDateString();
+          var todayDone = isDayFullyDone(todayStr);
+
+          if (todayDone) {
+            streak++;
+          }
+
+          for (var i = 1; i <= 365; i++) {
+            var prevDate = new Date(d.getTime() - i * 24 * 60 * 60 * 1000);
+            var y = prevDate.getFullYear();
+            var m = String(prevDate.getMonth() + 1).padStart(2, '0');
+            var day = String(prevDate.getDate()).padStart(2, '0');
+            var pStr = y + '-' + m + '-' + day;
+            if (isDayFullyDone(pStr)) {
+              streak++;
+            } else {
+              break;
+            }
+          }
+          return streak;
+        }
+
+        function isDayFullyDone(dateStr) {
+          var todayStr = getTodayDateString();
+          var dayRec = appState.days[dateStr];
+          if (dateStr === todayStr) {
+            var everyDayAllDone = appState.pipeline.everyDay.every(function(v) { return !!v; });
+            var studyDone = !!(dayRec && dayRec.studyDone);
+            return everyDayAllDone && studyDone;
+          } else {
+            return !!(dayRec && dayRec.fullyCompleted);
+          }
+        }
+
+        // Helper for Status Word
+        function getStatusWord(actual, target) {
+          var a = Number(actual) || 0;
+          var t = Number(target) || 0;
+          if (t <= 0) {
+            return { word: a > 0 ? 'Ahead' : 'On track', className: a > 0 ? 'status-ahead' : 'status-ontrack' };
+          }
+          if (a > t) {
+            return { word: 'Ahead', className: 'status-ahead' };
+          } else if (a === t || a >= t * 0.95) {
+            return { word: 'On track', className: 'status-ontrack' };
+          } else {
+            return { word: 'Behind', className: 'status-behind' };
+          }
+        }
+
+        // Render Today
+        function renderToday() {
+          var todayStr = getTodayDateString();
+          var d = new Date();
+          var dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+          var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          var dateLabel = dayNames[d.getDay()] + ', ' + d.getDate() + ' ' + monthNames[d.getMonth()] + ' ' + d.getFullYear();
+
+          var dateEl = document.getElementById('today-date-string');
+          if (dateEl) dateEl.textContent = dateLabel;
+
+          var rec = getDayRecord(todayStr);
+
+          // Messages sent today
+          var msgInput = document.getElementById('today-messages-input');
+          if (msgInput) msgInput.value = rec.messagesSent || 0;
+
+          // Note
+          var noteInput = document.getElementById('today-note-input');
+          if (noteInput) noteInput.value = rec.note || '';
+
+          // Today checklist syncs from Pipeline.everyDay (items 0 to 3) + study block
+          var pipelineEveryDay = appState.pipeline.everyDay;
+          var mapping = [
+            { id: 'check-messages10', item: 'messages10', isChecked: !!pipelineEveryDay[0] },
+            { id: 'check-followups', item: 'followups', isChecked: !!pipelineEveryDay[1] },
+            { id: 'check-leadsheet', item: 'leadsheet', isChecked: !!pipelineEveryDay[2] },
+            { id: 'check-content', item: 'content', isChecked: !!pipelineEveryDay[3] },
+            { id: 'check-study', item: 'study', isChecked: !!rec.studyDone }
+          ];
+
+          var completedCount = 0;
+          mapping.forEach(function(m) {
+            if (m.isChecked) completedCount++;
+            var cb = document.getElementById(m.id);
+            if (cb) cb.checked = m.isChecked;
+            var li = document.querySelector('#today-checklist .checklist-item[data-item="' + m.item + '"]');
+            if (li) {
+              if (m.isChecked) li.classList.add('done');
+              else li.classList.remove('done');
+            }
+          });
+
+          // Record if today is fully completed
+          if (completedCount === 5) {
+            rec.fullyCompleted = true;
+          }
+
+          var counter = document.getElementById('checklist-counter');
+          if (counter) counter.textContent = completedCount + ' / 5 done';
+
+          var streak = calculateStreak();
+          var streakEl = document.getElementById('today-streak-display');
+          if (streakEl) {
+            streakEl.textContent = streak + ' day streak';
+            streakEl.className = 'status-text ' + (streak > 0 ? 'status-ontrack' : 'status-behind');
+          }
+        }
+
+        // Render Week
+        function renderWeek() {
+          var rec = getWeekRecord(selectedWeekIndex);
+          var weekLabel = document.getElementById('week-label');
+          if (weekLabel) weekLabel.textContent = 'Week ' + selectedWeekIndex + ' of 52';
+
+          var dateRange = document.getElementById('week-date-range');
+          if (dateRange) dateRange.textContent = getWeekDateRange(selectedWeekIndex);
+
+          document.getElementById('log-week-messages').value = rec.messages || 0;
+          document.getElementById('log-week-conversations').value = rec.conversations || 0;
+          document.getElementById('log-week-quotes').value = rec.quotes || 0;
+          document.getElementById('log-week-websites').value = rec.websites || 0;
+          document.getElementById('log-week-retainers').value = rec.retainers || 0;
+          document.getElementById('log-week-cash').value = rec.cashReceived || 0;
+          document.getElementById('log-week-study').value = rec.studyHours || 0;
+          document.getElementById('log-week-sideproduct').value = rec.sideProductHours || 0;
+
+          var tMessages = appState.settings.weeklyTargets.messages;
+          var tConversations = appState.settings.weeklyTargets.conversations;
+          var tQuotes = appState.settings.weeklyTargets.quotes;
+          var tWebsites = Math.round((appState.settings.planTargets.websitesPerMonth / 4) * 10) / 10;
+          var tRetainers = Math.round((appState.settings.planTargets.newRetainersPerMonth / 4) * 10) / 10;
+          var tCash = Math.round((appState.settings.quarterTargets.q1 || 1500000) / 13);
+
+          var listContainer = document.getElementById('week-scorecard-list');
+          if (!listContainer) return;
+
+          var metrics = [
+            {
+              title: 'Outreach messages',
+              done: rec.messages || 0,
+              target: tMessages,
+              format: function(v) { return v; },
+              status: getStatusWord(rec.messages || 0, tMessages)
+            },
+            {
+              title: 'Conversations held',
+              done: rec.conversations || 0,
+              target: tConversations,
+              format: function(v) { return v; },
+              status: getStatusWord(rec.conversations || 0, tConversations)
+            },
+            {
+              title: 'Quotes sent',
+              done: rec.quotes || 0,
+              target: tQuotes,
+              format: function(v) { return v; },
+              status: getStatusWord(rec.quotes || 0, tQuotes)
+            },
+            {
+              title: 'Websites closed',
+              done: rec.websites || 0,
+              target: tWebsites,
+              format: function(v) { return v; },
+              status: getStatusWord(rec.websites || 0, tWebsites)
+            },
+            {
+              title: 'Retainers signed',
+              done: rec.retainers || 0,
+              target: tRetainers,
+              format: function(v) { return v; },
+              status: getStatusWord(rec.retainers || 0, tRetainers)
+            },
+            {
+              title: 'Cash received',
+              done: rec.cashReceived || 0,
+              target: tCash,
+              format: formatNaira,
+              status: getStatusWord(rec.cashReceived || 0, tCash)
+            },
+            {
+              title: 'Study hours',
+              done: rec.studyHours || 0,
+              target: null,
+              format: function(v) { return v + ' hrs'; },
+              status: null
+            },
+            {
+              title: 'Side product hours',
+              done: rec.sideProductHours || 0,
+              target: null,
+              format: function(v) { return v + ' hrs'; },
+              status: null
+            }
+          ];
+
+          var isWeekEmpty = (rec.messages || 0) === 0 &&
+                            (rec.conversations || 0) === 0 &&
+                            (rec.quotes || 0) === 0 &&
+                            (rec.websites || 0) === 0 &&
+                            (rec.retainers || 0) === 0 &&
+                            (rec.cashReceived || 0) === 0 &&
+                            (rec.studyHours || 0) === 0 &&
+                            (rec.sideProductHours || 0) === 0;
+
+          var html = isWeekEmpty ? '<div class="empty-state">Nothing logged this week. Log your first number below.</div>' : '';
+          metrics.forEach(function(m) {
+            var dataText = '';
+            if (m.target !== null) {
+              dataText = m.format(m.done) + ' / ' + m.format(m.target) + ' &middot; <span class="' + m.status.className + '">' + m.status.word + '</span>';
+            } else {
+              dataText = m.format(m.done);
+            }
+
+            html += '<div class="summary-row">' +
+              '<div class="summary-row-title">' + m.title + '</div>' +
+              '<div class="summary-row-data"><span class="summary-row-val">' + dataText + '</span></div>' +
+            '</div>';
+          });
+
+          listContainer.innerHTML = html;
+        }
+
+        // Render Month
+        function renderMonth() {
+          var rec = getMonthRecord(selectedMonthIndex);
+          var monthTitle = MONTH_NAMES[selectedMonthIndex];
+
+          var mLabel = document.getElementById('month-label');
+          if (mLabel) mLabel.textContent = monthTitle;
+
+          var mSubtitle = document.getElementById('month-plan-subtitle');
+          if (mSubtitle) mSubtitle.textContent = 'Month ' + (selectedMonthIndex + 1) + ' of 12';
+
+          document.getElementById('log-month-revenue').value = rec.revenueReceived || 0;
+          document.getElementById('log-month-websites').value = rec.websitesClosed || 0;
+          document.getElementById('log-month-retainers-active').value = rec.activeRetainers || 0;
+          document.getElementById('log-month-retainers-lost').value = rec.retainersLost || 0;
+          document.getElementById('log-month-open-quotes').value = rec.openQuotes || 0;
+
+          var qNum = Math.floor(selectedMonthIndex / 3) + 1;
+          var qTarget = appState.settings.quarterTargets['q' + qNum] || 1500000;
+          var monthlyRevenueTarget = Math.round(qTarget / 3);
+
+          var websiteTarget = appState.settings.planTargets.websitesPerMonth;
+          var retainerTarget = Math.min((selectedMonthIndex + 1) * appState.settings.planTargets.newRetainersPerMonth, appState.settings.planTargets.activeRetainersCap);
+
+          var revStatus = getStatusWord(rec.revenueReceived || 0, monthlyRevenueTarget);
+          var webStatus = getStatusWord(rec.websitesClosed || 0, websiteTarget);
+          var retStatus = getStatusWord(rec.activeRetainers || 0, retainerTarget);
+
+          var overallStatusEl = document.getElementById('month-overall-status');
+          if (overallStatusEl) {
+            overallStatusEl.textContent = revStatus.word;
+            overallStatusEl.className = 'status-text ' + revStatus.className;
+          }
+
+          var compList = document.getElementById('month-comparison-list');
+          if (compList) {
+            var rows = [
+              {
+                title: 'Revenue received',
+                actual: formatNaira(rec.revenueReceived || 0),
+                target: formatNaira(monthlyRevenueTarget),
+                status: revStatus
+              },
+              {
+                title: 'Websites closed',
+                actual: rec.websitesClosed || 0,
+                target: websiteTarget,
+                status: webStatus
+              },
+              {
+                title: 'Active retainers',
+                actual: rec.activeRetainers || 0,
+                target: retainerTarget,
+                status: retStatus
+              },
+              {
+                title: 'Retainers lost (churn)',
+                actual: rec.retainersLost || 0,
+                target: 0,
+                status: {
+                  word: (rec.retainersLost || 0) > 0 ? 'Watch churn' : 'Clean',
+                  className: (rec.retainersLost || 0) > 0 ? 'status-behind' : 'status-ontrack'
+                }
+              },
+              {
+                title: 'Open quotes in pipeline',
+                actual: rec.openQuotes || 0,
+                target: null,
+                status: null
+              }
+            ];
+
+            var isMonthEmpty = (rec.revenueReceived || 0) === 0 &&
+                               (rec.websitesClosed || 0) === 0 &&
+                               (rec.activeRetainers || 0) === 0 &&
+                               (rec.retainersLost || 0) === 0 &&
+                               (rec.openQuotes || 0) === 0;
+
+            var html = isMonthEmpty ? '<div class="empty-state">Nothing logged this month. Log your first number below.</div>' : '';
+            rows.forEach(function(r) {
+              var rightSide = '';
+              if (r.target !== null && r.status) {
+                rightSide = r.actual + ' / ' + r.target + ' &middot; <span class="' + r.status.className + '">' + r.status.word + '</span>';
+              } else {
+                rightSide = r.actual;
+              }
+              html += '<div class="summary-row">' +
+                '<div class="summary-row-title">' + r.title + '</div>' +
+                '<div class="summary-row-data"><span class="summary-row-val">' + rightSide + '</span></div>' +
+              '</div>';
+            });
+            compList.innerHTML = html;
+          }
+
+          var loggedCount = 0;
+          var totalRevenueLogged = 0;
+          MONTH_KEYS.forEach(function(mKey) {
+            var mData = appState.months[mKey];
+            if (mData && (mData.revenueReceived > 0 || mData.websitesClosed > 0 || mData.activeRetainers > 0)) {
+              loggedCount++;
+              totalRevenueLogged += Number(mData.revenueReceived) || 0;
+            }
+          });
+
+          var runRate = loggedCount > 0 ? Math.round(totalRevenueLogged / loggedCount) : 0;
+          var forecast = loggedCount > 0 ? Math.round(runRate * 12) : 0;
+
+          var rrEl = document.getElementById('month-run-rate-val');
+          if (rrEl) rrEl.textContent = formatNaira(runRate);
+
+          var fcEl = document.getElementById('month-forecast-val');
+          if (fcEl) fcEl.textContent = formatNaira(forecast);
+
+          var fcSub = document.getElementById('month-forecast-sub');
+          if (fcSub) {
+            var diff = forecast - appState.settings.yearGoal;
+            if (loggedCount === 0) {
+              fcSub.textContent = 'No months logged yet. Real zeros shown.';
+            } else if (diff >= 0) {
+              fcSub.textContent = '+' + formatNaira(diff) + ' ahead of ₦10,000,000 goal';
+            } else {
+              fcSub.textContent = formatNaira(Math.abs(diff)) + ' short of ₦10,000,000 goal';
+            }
+          }
+        }
+
+        // Render Year
+        function renderYear() {
+          var totalRevenue = 0;
+          var quarters = [
+            { id: 1, name: 'Q1 (Nov 2026 - Jan 2027)', months: [0, 1, 2], targetKey: 'q1', actual: 0 },
+            { id: 2, name: 'Q2 (Feb 2027 - Apr 2027)', months: [3, 4, 5], targetKey: 'q2', actual: 0 },
+            { id: 3, name: 'Q3 (May 2027 - Jul 2027)', months: [6, 7, 8], targetKey: 'q3', actual: 0 },
+            { id: 4, name: 'Q4 (Aug 2027 - Oct 2027)', months: [9, 10, 11], targetKey: 'q4', actual: 0 }
+          ];
+
+          quarters.forEach(function(q) {
+            q.months.forEach(function(mIdx) {
+              var rec = getMonthRecord(mIdx);
+              q.actual += Number(rec.revenueReceived) || 0;
+            });
+            totalRevenue += q.actual;
+          });
+
+          var yearGoal = appState.settings.yearGoal || 10000000;
+          var pct = ((totalRevenue / yearGoal) * 100).toFixed(1);
+
+          var pctEl = document.getElementById('year-percent-val');
+          if (pctEl) pctEl.textContent = pct + '%';
+
+          var fillEl = document.getElementById('year-progress-fill');
+          if (fillEl) fillEl.style.width = Math.min(pct, 100) + '%';
+
+          var loggedText = document.getElementById('year-total-logged-text');
+          if (loggedText) loggedText.textContent = formatNaira(totalRevenue);
+
+          var start = getStartDateTime();
+          var now = new Date();
+          var diffMs = now.getTime() - start.getTime();
+          var totalYearMs = 365 * 24 * 60 * 60 * 1000;
+          var fractionYear = Math.max(0, Math.min(1, diffMs / totalYearMs));
+          var expectedRevenueToDate = Math.round(yearGoal * fractionYear);
+
+          var diffFromPace = totalRevenue - expectedRevenueToDate;
+          var verdictSentence = '';
+          var verdictClass = '';
+
+          if (totalRevenue === 0 && diffMs <= 24 * 60 * 60 * 1000) {
+            verdictSentence = 'Day 1 of the journey. You are on track with planned launch.';
+            verdictClass = 'verdict-ontrack';
+          } else if (diffFromPace >= 0) {
+            if (diffFromPace === 0) {
+              verdictSentence = 'You are on track with the planned revenue pace.';
+              verdictClass = 'verdict-ontrack';
+            } else {
+              verdictSentence = 'You are ahead of plan by ' + formatNaira(diffFromPace) + ' based on expected pace to date.';
+              verdictClass = 'verdict-ahead';
+            }
+          } else {
+            var behindAmt = Math.abs(diffFromPace);
+            verdictSentence = 'You are behind plan by ' + formatNaira(behindAmt) + ' based on expected pace to date.';
+            verdictClass = 'verdict-behind';
+          }
+
+          var vEl = document.getElementById('year-verdict-sentence');
+          if (vEl) {
+            vEl.textContent = verdictSentence;
+            vEl.className = 'verdict-callout ' + verdictClass;
+          }
+
+          var qList = document.getElementById('year-quarter-list');
+          if (qList) {
+            var qHtml = '';
+            quarters.forEach(function(q) {
+              var qTarget = appState.settings.quarterTargets[q.targetKey] || 0;
+              var qStatus = getStatusWord(q.actual, qTarget);
+              qHtml += '<div class="summary-row">' +
+                '<div>' +
+                  '<div class="summary-row-title">' + q.name + '</div>' +
+                  '<div style="font-size: 12px; color: var(--text-muted);">' + formatNaira(q.actual) + ' of ' + formatNaira(qTarget) + '</div>' +
+                '</div>' +
+                '<div class="summary-row-data">' +
+                  '<span class="status-text ' + qStatus.className + '">' + qStatus.word + '</span>' +
+                '</div>' +
+              '</div>';
+            });
+            qList.innerHTML = qHtml;
+          }
+
+          var mList = document.getElementById('year-month-summary-list');
+          if (mList) {
+            var mHtml = '';
+            MONTH_KEYS.forEach(function(mKey, idx) {
+              var rec = getMonthRecord(idx);
+              var rev = rec.revenueReceived || 0;
+              mHtml += '<div class="summary-row">' +
+                '<div class="summary-row-title">' + MONTH_NAMES[idx] + '</div>' +
+                '<div class="summary-row-data"><span class="summary-row-val">' + formatNaira(rev) + '</span></div>' +
+              '</div>';
+            });
+            mList.innerHTML = mHtml;
+          }
+        }
+
+        // Render Pipeline
+        function renderPipeline() {
+          var p = appState.pipeline;
+          var totalItems = 34;
+          var totalDone = 0;
+
+          var listConfigs = [
+            { key: 'setupOnce', listId: 'list-pipeline-setup', counterId: 'counter-pipeline-setup' },
+            { key: 'everyDay', listId: 'list-pipeline-everyday', counterId: 'counter-pipeline-everyday' },
+            { key: 'followUpCadence', listId: 'list-pipeline-followup', counterId: 'counter-pipeline-followup' },
+            { key: 'salesConversation', listId: 'list-pipeline-sales', counterId: 'counter-pipeline-sales' },
+            { key: 'onboarding', listId: 'list-pipeline-onboarding', counterId: 'counter-pipeline-onboarding' },
+            { key: 'afterDelivery', listId: 'list-pipeline-afterdelivery', counterId: 'counter-pipeline-afterdelivery' }
+          ];
+
+          listConfigs.forEach(function(cfg) {
+            var def = PIPELINE_DEFINITIONS[cfg.key];
+            var states = p[cfg.key] || [];
+            var listEl = document.getElementById(cfg.listId);
+            var counterEl = document.getElementById(cfg.counterId);
+
+            var listDone = 0;
+            var html = '';
+
+            def.items.forEach(function(text, idx) {
+              var isChecked = !!states[idx];
+              if (isChecked) {
+                listDone++;
+                totalDone++;
+              }
+              var inputId = 'pipe-' + cfg.key + '-' + idx;
+              html += '<li class="checklist-item ' + (isChecked ? 'done' : '') + '">' +
+                '<input type="checkbox" id="' + inputId + '" data-list="' + cfg.key + '" data-index="' + idx + '" ' + (isChecked ? 'checked' : '') + ' />' +
+                '<label class="checklist-label" for="' + inputId + '">' + text + '</label>' +
+              '</li>';
+            });
+
+            if (listEl) listEl.innerHTML = html;
+            if (counterEl) counterEl.textContent = listDone + '/' + def.items.length;
+          });
+
+          var totalCounterEl = document.getElementById('pipeline-total-counter');
+          if (totalCounterEl) {
+            totalCounterEl.textContent = totalDone + ' of ' + totalItems + ' done';
+          }
+
+          var progressFill = document.getElementById('pipeline-progress-fill');
+          if (progressFill) {
+            var pct = ((totalDone / totalItems) * 100).toFixed(1);
+            progressFill.style.width = pct + '%';
+          }
+        }
+
+        // Render Settings
+        function renderSettings() {
+          var s = appState.settings;
+          document.getElementById('setting-year-goal').value = s.yearGoal;
+          document.getElementById('setting-start-date').value = s.startDate;
+
+          document.getElementById('setting-price-website').value = s.prices.website;
+          document.getElementById('setting-price-retainer').value = s.prices.retainerMonthly;
+          document.getElementById('setting-price-maint').value = s.prices.maintenanceMonthly;
+
+          document.getElementById('setting-target-websites-month').value = s.planTargets.websitesPerMonth;
+          document.getElementById('setting-target-retainers-month').value = s.planTargets.newRetainersPerMonth;
+          document.getElementById('setting-target-retainers-cap').value = s.planTargets.activeRetainersCap;
+
+          document.getElementById('setting-target-messages').value = s.weeklyTargets.messages;
+          document.getElementById('setting-target-conversations').value = s.weeklyTargets.conversations;
+          document.getElementById('setting-target-quotes').value = s.weeklyTargets.quotes;
+
+          document.getElementById('setting-target-q1').value = s.quarterTargets.q1;
+          document.getElementById('setting-target-q2').value = s.quarterTargets.q2;
+          document.getElementById('setting-target-q3').value = s.quarterTargets.q3;
+          document.getElementById('setting-target-q4').value = s.quarterTargets.q4;
+        }
+
+        function saveSettingsFromUI() {
+          var s = appState.settings;
+          s.yearGoal = Number(document.getElementById('setting-year-goal').value) || 10000000;
+          s.startDate = document.getElementById('setting-start-date').value || '2026-11-01';
+
+          s.prices.website = Number(document.getElementById('setting-price-website').value) || 150000;
+          s.prices.retainerMonthly = Number(document.getElementById('setting-price-retainer').value) || 80000;
+          s.prices.maintenanceMonthly = Number(document.getElementById('setting-price-maint').value) || 15000;
+
+          s.planTargets.websitesPerMonth = Number(document.getElementById('setting-target-websites-month').value) || 2;
+          s.planTargets.newRetainersPerMonth = Number(document.getElementById('setting-target-retainers-month').value) || 1;
+          s.planTargets.activeRetainersCap = Number(document.getElementById('setting-target-retainers-cap').value) || 8;
+
+          s.weeklyTargets.messages = Number(document.getElementById('setting-target-messages').value) || 50;
+          s.weeklyTargets.conversations = Number(document.getElementById('setting-target-conversations').value) || 5;
+          s.weeklyTargets.quotes = Number(document.getElementById('setting-target-quotes').value) || 3;
+
+          s.quarterTargets.q1 = Number(document.getElementById('setting-target-q1').value) || 1500000;
+          s.quarterTargets.q2 = Number(document.getElementById('setting-target-q2').value) || 2400000;
+          s.quarterTargets.q3 = Number(document.getElementById('setting-target-q3').value) || 3200000;
+          s.quarterTargets.q4 = Number(document.getElementById('setting-target-q4').value) || 3500000;
+
+          saveState();
+          showToast('Settings saved successfully');
+          renderAll();
+        }
+
+        function renderAll() {
+          renderToday();
+          renderWeek();
+          renderMonth();
+          renderYear();
+          renderPipeline();
+        }
+
+        // Tab Navigation
+        function switchTab(tabId) {
+          var tabs = document.querySelectorAll('.nav-btn');
+          tabs.forEach(function(btn) {
+            if (btn.getAttribute('data-tab') === tabId) {
+              btn.classList.add('active');
+            } else {
+              btn.classList.remove('active');
+            }
+          });
+
+          var screens = document.querySelectorAll('.screen-view');
+          screens.forEach(function(s) {
+            if (s.id === 'screen-' + tabId) {
+              s.classList.add('active');
+            } else {
+              s.classList.remove('active');
+            }
+          });
+
+          if (tabId === 'today') renderToday();
+          if (tabId === 'week') renderWeek();
+          if (tabId === 'month') renderMonth();
+          if (tabId === 'year') renderYear();
+          if (tabId === 'pipeline') renderPipeline();
+          if (tabId === 'settings') renderSettings();
+
+          window.scrollTo(0, 0);
+        }
+
+        // Sunday Review Plain Text Generator
+        function generateSundayReviewText() {
+          var rec = getWeekRecord(selectedWeekIndex);
+          var range = getWeekDateRange(selectedWeekIndex);
+          var tMessages = appState.settings.weeklyTargets.messages;
+          var tConversations = appState.settings.weeklyTargets.conversations;
+          var tQuotes = appState.settings.weeklyTargets.quotes;
+          var tCash = Math.round((appState.settings.quarterTargets.q1 || 1500000) / 13);
+
+          var sMsg = getStatusWord(rec.messages || 0, tMessages).word;
+          var sConv = getStatusWord(rec.conversations || 0, tConversations).word;
+          var sQuote = getStatusWord(rec.quotes || 0, tQuotes).word;
+          var sCash = getStatusWord(rec.cashReceived || 0, tCash).word;
+
+          return [
+            'SUNDAY WEEKLY REVIEW (Week ' + selectedWeekIndex + ': ' + range + ')',
+            'Studio: Websites and Social Media Management (Abuja)',
+            '',
+            'ACTIVITY AND PIPELINE:',
+            '- Outreach messages: ' + (rec.messages || 0) + ' / ' + tMessages + ' (' + sMsg + ')',
+            '- Conversations: ' + (rec.conversations || 0) + ' / ' + tConversations + ' (' + sConv + ')',
+            '- Quotes sent: ' + (rec.quotes || 0) + ' / ' + tQuotes + ' (' + sQuote + ')',
+            '- Websites closed: ' + (rec.websites || 0),
+            '- Retainers signed: ' + (rec.retainers || 0),
+            '- Cash received: ' + formatNaira(rec.cashReceived || 0) + ' / ' + formatNaira(tCash) + ' (' + sCash + ')',
+            '',
+            'DISCIPLINE AND FOCUS:',
+            '- Hours on study: ' + (rec.studyHours || 0) + ' hrs',
+            '- Hours on side product lines: ' + (rec.sideProductHours || 0) + ' hrs'
+          ].join('\n');
+        }
+
+        // Week AI Prompt Generator
+        function generateWeekAiPrompt() {
+          var rec = getWeekRecord(selectedWeekIndex);
+          var range = getWeekDateRange(selectedWeekIndex);
+          var tMessages = appState.settings.weeklyTargets.messages;
+          var tConversations = appState.settings.weeklyTargets.conversations;
+          var tQuotes = appState.settings.weeklyTargets.quotes;
+          var tCash = Math.round((appState.settings.quarterTargets.q1 || 1500000) / 13);
+
+          var sMsg = getStatusWord(rec.messages || 0, tMessages).word;
+          var sConv = getStatusWord(rec.conversations || 0, tConversations).word;
+          var sQuote = getStatusWord(rec.quotes || 0, tQuotes).word;
+          var sCash = getStatusWord(rec.cashReceived || 0, tCash).word;
+
+          return [
+            'Act as my blunt business accountability partner. No flattery.',
+            '',
+            'Here are my logged numbers and targets for Week ' + selectedWeekIndex + ' (' + range + '):',
+            '- Outreach messages: ' + (rec.messages || 0) + ' / ' + tMessages + ' (' + sMsg + ')',
+            '- Conversations: ' + (rec.conversations || 0) + ' / ' + tConversations + ' (' + sConv + ')',
+            '- Quotes sent: ' + (rec.quotes || 0) + ' / ' + tQuotes + ' (' + sQuote + ')',
+            '- Websites closed: ' + (rec.websites || 0) + ' (Target: 2 per month)',
+            '- Retainers signed: ' + (rec.retainers || 0) + ' (Target: 1 per month until 8 active)',
+            '- Cash received: ' + formatNaira(rec.cashReceived || 0) + ' (Target weekly pace: ' + formatNaira(tCash) + ') (' + sCash + ')',
+            '- Study hours: ' + (rec.studyHours || 0) + ' hrs',
+            '- Side product lines hours: ' + (rec.sideProductHours || 0) + ' hrs',
+            '',
+            'Tell me if I am on or off track, which number is weakest, and the 3 actions for next week.'
+          ].join('\n');
+        }
+
+        // Monthly Review Plain Text Generator
+        function generateMonthlyReviewText() {
+          var rec = getMonthRecord(selectedMonthIndex);
+          var monthTitle = MONTH_NAMES[selectedMonthIndex];
+          var qNum = Math.floor(selectedMonthIndex / 3) + 1;
+          var qTarget = appState.settings.quarterTargets['q' + qNum] || 1500000;
+          var monthlyRevenueTarget = Math.round(qTarget / 3);
+
+          var revStatus = getStatusWord(rec.revenueReceived || 0, monthlyRevenueTarget).word;
+          var webStatus = getStatusWord(rec.websitesClosed || 0, appState.settings.planTargets.websitesPerMonth).word;
+
+          return [
+            'MONTHLY REVIEW: ' + monthTitle,
+            'Studio: Websites and Social Media Management (Abuja)',
+            '',
+            '- Revenue received: ' + formatNaira(rec.revenueReceived || 0) + ' / ' + formatNaira(monthlyRevenueTarget) + ' (' + revStatus + ')',
+            '- Websites closed: ' + (rec.websitesClosed || 0) + ' / ' + appState.settings.planTargets.websitesPerMonth + ' (' + webStatus + ')',
+            '- Active retainers: ' + (rec.activeRetainers || 0) + ' / ' + appState.settings.planTargets.activeRetainersCap + ' cap',
+            '- Retainers lost (churn): ' + (rec.retainersLost || 0),
+            '- Open quotes in pipeline: ' + (rec.openQuotes || 0)
+          ].join('\n');
+        }
+
+        // Month AI Prompt Generator
+        function generateMonthAiPrompt() {
+          var rec = getMonthRecord(selectedMonthIndex);
+          var monthTitle = MONTH_NAMES[selectedMonthIndex];
+          var qNum = Math.floor(selectedMonthIndex / 3) + 1;
+          var qTarget = appState.settings.quarterTargets['q' + qNum] || 1500000;
+          var monthlyRevenueTarget = Math.round(qTarget / 3);
+
+          var totalRev = 0;
+          var loggedMonths = 0;
+          MONTH_KEYS.forEach(function(k) {
+            var m = appState.months[k];
+            if (m && (m.revenueReceived > 0 || m.websitesClosed > 0)) {
+              loggedMonths++;
+              totalRev += Number(m.revenueReceived) || 0;
+            }
+          });
+          var runRate = loggedMonths > 0 ? Math.round(totalRev / loggedMonths) : 0;
+          var forecast = loggedMonths > 0 ? Math.round(runRate * 12) : 0;
+
+          return [
+            'Act as my blunt business accountability partner. No flattery.',
+            '',
+            'Here are my logged numbers and targets for ' + monthTitle + ':',
+            '- Revenue received: ' + formatNaira(rec.revenueReceived || 0) + ' (Planned monthly target: ' + formatNaira(monthlyRevenueTarget) + ')',
+            '- Websites closed: ' + (rec.websitesClosed || 0) + ' (Planned target: ' + appState.settings.planTargets.websitesPerMonth + ')',
+            '- Active retainers: ' + (rec.activeRetainers || 0) + ' (Planned cap: ' + appState.settings.planTargets.activeRetainersCap + ')',
+            '- Retainers lost (churn): ' + (rec.retainersLost || 0),
+            '- Open quotes in pipeline: ' + (rec.openQuotes || 0),
+            '- Monthly run rate: ' + formatNaira(runRate) + ' / month',
+            '- Year-end revenue forecast: ' + formatNaira(forecast) + ' vs ' + formatNaira(appState.settings.yearGoal) + ' goal',
+            '',
+            'Tell me if I am on or off track, which number is weakest, and the 3 actions for next week.'
+          ].join('\n');
+        }
+
+        // Reset a specific pipeline list
+        function resetPipelineList(listKey, label) {
+          if (appState.pipeline[listKey]) {
+            appState.pipeline[listKey] = appState.pipeline[listKey].map(function() { return false; });
+            saveState();
+            renderPipeline();
+            if (listKey === 'everyDay') {
+              renderToday();
+            }
+            showToast(label + ' checklist reset');
+          }
+        }
+
+        // Setup Event Listeners
+        function setupEventListeners() {
+          // Bottom Navigation
+          var navBtns = document.querySelectorAll('.nav-btn');
+          navBtns.forEach(function(btn) {
+            btn.addEventListener('click', function() {
+              var tab = btn.getAttribute('data-tab');
+              switchTab(tab);
+            });
+          });
+
+          // Today Checklist Checkboxes (Reads and writes to Pipeline.everyDay + studyDone)
+          var todayChecklist = document.getElementById('today-checklist');
+          if (todayChecklist) {
+            todayChecklist.addEventListener('change', function(e) {
+              if (e.target && e.target.type === 'checkbox') {
+                var itemKey = e.target.id.replace('check-', '');
+                var isChecked = e.target.checked;
+                var todayStr = getTodayDateString();
+                var dayRec = getDayRecord(todayStr);
+
+                if (itemKey === 'messages10') {
+                  appState.pipeline.everyDay[0] = isChecked;
+                } else if (itemKey === 'followups') {
+                  appState.pipeline.everyDay[1] = isChecked;
+                } else if (itemKey === 'leadsheet') {
+                  appState.pipeline.everyDay[2] = isChecked;
+                } else if (itemKey === 'content') {
+                  appState.pipeline.everyDay[3] = isChecked;
+                } else if (itemKey === 'study') {
+                  dayRec.studyDone = isChecked;
+                }
+
+                saveState();
+                renderToday();
+                renderPipeline();
+              }
+            });
+          }
+
+          // Today Messages Input
+          var todayMsg = document.getElementById('today-messages-input');
+          if (todayMsg) {
+            todayMsg.addEventListener('input', function() {
+              var val = Math.max(0, parseInt(todayMsg.value, 10) || 0);
+              var todayStr = getTodayDateString();
+              var rec = getDayRecord(todayStr);
+              var oldVal = rec.messagesSent || 0;
+              rec.messagesSent = val;
+
+              // If reached 10 or more, check the 10 messages WhatsApp item
+              if (val >= 10 && !appState.pipeline.everyDay[0]) {
+                appState.pipeline.everyDay[0] = true;
+              }
+
+              // Also sync difference to current week messages
+              var currWk = getCurrentWeekNumber();
+              var wkRec = getWeekRecord(currWk);
+              var diff = val - oldVal;
+              wkRec.messages = Math.max(0, (wkRec.messages || 0) + diff);
+
+              saveState();
+              renderToday();
+              renderWeek();
+              renderPipeline();
+            });
+          }
+
+          var add10Btn = document.getElementById('today-messages-add10');
+          if (add10Btn) {
+            add10Btn.addEventListener('click', function() {
+              var todayStr = getTodayDateString();
+              var rec = getDayRecord(todayStr);
+              var current = rec.messagesSent || 0;
+              rec.messagesSent = current + 10;
+              appState.pipeline.everyDay[0] = true;
+
+              var currWk = getCurrentWeekNumber();
+              var wkRec = getWeekRecord(currWk);
+              wkRec.messages = (wkRec.messages || 0) + 10;
+
+              saveState();
+              renderToday();
+              renderWeek();
+              renderPipeline();
+              showToast('+10 messages logged');
+            });
+          }
+
+          // Today Note Input
+          var todayNote = document.getElementById('today-note-input');
+          if (todayNote) {
+            todayNote.addEventListener('input', function() {
+              var todayStr = getTodayDateString();
+              var rec = getDayRecord(todayStr);
+              rec.note = todayNote.value;
+              saveState();
+            });
+          }
+
+          // Pipeline Checklist Checkboxes delegation
+          var screenPipeline = document.getElementById('screen-pipeline');
+          if (screenPipeline) {
+            screenPipeline.addEventListener('change', function(e) {
+              if (e.target && e.target.type === 'checkbox') {
+                var listKey = e.target.getAttribute('data-list');
+                var index = parseInt(e.target.getAttribute('data-index'), 10);
+                if (listKey && !isNaN(index) && appState.pipeline[listKey]) {
+                  appState.pipeline[listKey][index] = e.target.checked;
+                  saveState();
+                  renderPipeline();
+                  if (listKey === 'everyDay') {
+                    renderToday();
+                  }
+                }
+              }
+            });
+          }
+
+          // Pipeline List Resets
+          document.getElementById('btn-reset-everyday').addEventListener('click', function() {
+            resetPipelineList('everyDay', 'Every day');
+          });
+
+          document.getElementById('btn-reset-followup').addEventListener('click', function() {
+            resetPipelineList('followUpCadence', 'Follow-up cadence');
+          });
+
+          document.getElementById('btn-reset-sales').addEventListener('click', function() {
+            resetPipelineList('salesConversation', 'Sales conversation');
+          });
+
+          document.getElementById('btn-reset-onboarding').addEventListener('click', function() {
+            resetPipelineList('onboarding', 'Onboarding');
+          });
+
+          document.getElementById('btn-reset-afterdelivery').addEventListener('click', function() {
+            resetPipelineList('afterDelivery', 'After delivery');
+          });
+
+          // Pipeline Clear All
+          document.getElementById('btn-pipeline-clear-all').addEventListener('click', function() {
+            if (window.confirm('Clear all 34 pipeline checklist items? This will reset every list to unticked.')) {
+              for (var key in appState.pipeline) {
+                if (appState.pipeline.hasOwnProperty(key)) {
+                  appState.pipeline[key] = appState.pipeline[key].map(function() { return false; });
+                }
+              }
+              saveState();
+              renderPipeline();
+              renderToday();
+              showToast('All pipeline checklists cleared');
+            }
+          });
+
+          // Week Navigation
+          document.getElementById('week-prev-btn').addEventListener('click', function() {
+            if (selectedWeekIndex > 1) {
+              selectedWeekIndex--;
+              renderWeek();
+            }
+          });
+
+          document.getElementById('week-next-btn').addEventListener('click', function() {
+            if (selectedWeekIndex < 52) {
+              selectedWeekIndex++;
+              renderWeek();
+            }
+          });
+
+          document.getElementById('week-jump-current').addEventListener('click', function() {
+            selectedWeekIndex = getCurrentWeekNumber();
+            renderWeek();
+            showToast('Showing current week');
+          });
+
+          // Week Input Changes
+          var weekInputs = [
+            { id: 'log-week-messages', key: 'messages' },
+            { id: 'log-week-conversations', key: 'conversations' },
+            { id: 'log-week-quotes', key: 'quotes' },
+            { id: 'log-week-websites', key: 'websites' },
+            { id: 'log-week-retainers', key: 'retainers' },
+            { id: 'log-week-cash', key: 'cashReceived' },
+            { id: 'log-week-study', key: 'studyHours' },
+            { id: 'log-week-sideproduct', key: 'sideProductHours' }
+          ];
+
+          weekInputs.forEach(function(item) {
+            var el = document.getElementById(item.id);
+            if (el) {
+              el.addEventListener('input', function() {
+                var rec = getWeekRecord(selectedWeekIndex);
+                rec[item.key] = Number(el.value) || 0;
+                saveState();
+                renderWeek();
+                renderYear();
+              });
+            }
+          });
+
+          // Week Copy Buttons
+          document.getElementById('btn-copy-sunday-review').addEventListener('click', function() {
+            copyToClipboard(generateSundayReviewText(), 'Sunday review copied to clipboard');
+          });
+
+          document.getElementById('btn-copy-ai-prompt-week').addEventListener('click', function() {
+            copyToClipboard(generateWeekAiPrompt(), 'Week AI prompt copied to clipboard');
+          });
+
+          // Month Navigation
+          document.getElementById('month-prev-btn').addEventListener('click', function() {
+            if (selectedMonthIndex > 0) {
+              selectedMonthIndex--;
+              renderMonth();
+            }
+          });
+
+          document.getElementById('month-next-btn').addEventListener('click', function() {
+            if (selectedMonthIndex < 11) {
+              selectedMonthIndex++;
+              renderMonth();
+            }
+          });
+
+          // Month Input Changes
+          var monthInputs = [
+            { id: 'log-month-revenue', key: 'revenueReceived' },
+            { id: 'log-month-websites', key: 'websitesClosed' },
+            { id: 'log-month-retainers-active', key: 'activeRetainers' },
+            { id: 'log-month-retainers-lost', key: 'retainersLost' },
+            { id: 'log-month-open-quotes', key: 'openQuotes' }
+          ];
+
+          monthInputs.forEach(function(item) {
+            var el = document.getElementById(item.id);
+            if (el) {
+              el.addEventListener('input', function() {
+                var rec = getMonthRecord(selectedMonthIndex);
+                rec[item.key] = Number(el.value) || 0;
+                saveState();
+                renderMonth();
+                renderYear();
+              });
+            }
+          });
+
+          // Month Copy Buttons
+          document.getElementById('btn-copy-monthly-review').addEventListener('click', function() {
+            copyToClipboard(generateMonthlyReviewText(), 'Monthly review copied to clipboard');
+          });
+
+          document.getElementById('btn-copy-ai-prompt-month').addEventListener('click', function() {
+            copyToClipboard(generateMonthAiPrompt(), 'Month AI prompt copied to clipboard');
+          });
+
+          // Settings Save Button
+          document.getElementById('btn-save-settings').addEventListener('click', function() {
+            saveSettingsFromUI();
+          });
+
+          // Export JSON
+          document.getElementById('btn-export-json').addEventListener('click', function() {
+            try {
+              var dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(appState, null, 2));
+              var downloadAnchor = document.createElement('a');
+              var dateStr = getTodayDateString();
+              downloadAnchor.setAttribute("href", dataStr);
+              downloadAnchor.setAttribute("download", "abuja-studio-tracker-backup-" + dateStr + ".json");
+              document.body.appendChild(downloadAnchor);
+              downloadAnchor.click();
+              downloadAnchor.remove();
+              showToast('Backup downloaded');
+            } catch (e) {
+              showToast('Export failed');
+            }
+          });
+
+          // Import JSON
+          var importTrigger = document.getElementById('btn-import-trigger');
+          var importInput = document.getElementById('input-import-file');
+          if (importTrigger && importInput) {
+            importTrigger.addEventListener('click', function() {
+              importInput.click();
+            });
+
+            importInput.addEventListener('change', function(e) {
+              var file = e.target.files && e.target.files[0];
+              if (!file) return;
+              var reader = new FileReader();
+              reader.onload = function(evt) {
+                try {
+                  var imported = JSON.parse(evt.target.result);
+                  if (imported && typeof imported === 'object') {
+                    appState = mergeDeep(JSON.parse(JSON.stringify(DEFAULT_STATE)), imported);
+                    saveState();
+                    renderAll();
+                    renderSettings();
+                    showToast('Backup imported successfully');
+                  } else {
+                    showToast('Invalid backup file format');
+                  }
+                } catch (err) {
+                  showToast('Error reading JSON backup file');
+                }
+                importInput.value = '';
+              };
+              reader.readAsText(file);
+            });
+          }
+
+          // Reset Defaults
+          document.getElementById('btn-reset-defaults').addEventListener('click', function() {
+            if (window.confirm('Reset targets to standard plan defaults? Your logged entries and pipeline will be preserved.')) {
+              appState.settings = JSON.parse(JSON.stringify(DEFAULT_STATE.settings));
+              saveState();
+              renderSettings();
+              renderAll();
+              showToast('Targets reset to defaults');
+            }
+          });
+        }
+
+        // Initialize Application
+        function initApp() {
+          appState = loadState();
+          selectedWeekIndex = getCurrentWeekNumber();
+
+          var start = getStartDateTime();
+          var now = new Date();
+          var diffMonths = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
+          if (diffMonths >= 0 && diffMonths < 12) {
+            selectedMonthIndex = diffMonths;
+          } else {
+            selectedMonthIndex = 0;
+          }
+
+          setupEventListeners();
+          renderToday();
+          renderWeek();
+          renderMonth();
+          renderYear();
+          renderPipeline();
+          renderSettings();
+        }
+
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', initApp);
+        } else {
+          initApp();
+        }
+      })();
+    </script>
+  </body>
+</html>

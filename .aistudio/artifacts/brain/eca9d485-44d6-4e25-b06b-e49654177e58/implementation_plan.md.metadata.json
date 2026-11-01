@@ -1,0 +1,6 @@
+{
+  "summary":  "Comprehensive implementation plan for restructuring the Android assistant app into a proactive, offline-first personal assistant with universal conversational input, generic items table, now-or-later planner, proactive wake-up and briefings engine, person reminders, IMAP email check via Jakarta Mail and WorkManager, web tracker JSON import, memory facts, encrypted credentials, and custom dark design system.",
+  "updatedAt":  "2026-11-01T12:55:09.802097856Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

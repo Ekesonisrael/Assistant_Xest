@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Xestlab Assistant</string>
+    <string name="notification_channel_name">Scheduled Reminders</string>
+    <string name="notification_channel_desc">Spoken check-ins and goal nudges</string>
+    <string name="action_done">Done</string>
+    <string name="action_snooze">Snooze 15m</string>
+    <string name="action_open">Open</string>
+</resources>
