@@ -4,12 +4,12 @@ Native Android (Kotlin, Jetpack Compose, Room) proactive personal assistant that
 
 ---
 
-## 1. Universal Input
+## 1. First-Launch Name Onboarding, Daily Plan TTS & Voice Input
 
-Home is the assistant:
-- **"Tell me anything"**: Centered prompt accepting any natural language goal, task, note, reminder, or question by voice or text. No forms.
-- **Pulsing Mic**: Tap the circular microphone button; an animated outer ring indicates voice capture. The spoken reply is read aloud via TextToSpeech.
-- **Stop Speech**: Stop button immediately silences spoken playback at any time.
+- **First-Launch Name Prompt (Jetpack DataStore)**: On first launch, `SetupScreen` prompts for your name and saves it in Jetpack `DataStore<Preferences>` (`UserPreferencesDataStore`).
+- **Personalized Home Greeting & Daily Plan Readout**: `HomeScreen` greets you by your saved DataStore name in 32sp Serif and reads out your daily plan aloud using native Android `TextToSpeech` (with one-tap **Read Daily Plan** and **Stop** controls).
+- **Android SpeechRecognizer Voice Input**: Tap the circular `MIC` button to capture spoken tasks, person reminders, notes, or commands (e.g., `"Read my daily plan"`) via `android.speech.SpeechRecognizer` with live partial transcripts.
+- **"Tell me anything"**: Universal voice and text bar accepting natural language goals, tasks, notes, reminders, or questions.
 
 ---
 
