@@ -1,6 +1,6 @@
 {
   "name": "Abuja Studio Goal Tracker",
   "description": "Honest revenue and activity goal tracker for an Abuja studio targeting ₦10,000,000 across Nov 2026 to Oct 2027.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
