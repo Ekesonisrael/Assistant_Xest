@@ -66,6 +66,10 @@ android {
         compose = true
     }
 
+    androidResources {
+        noCompress += "ppn"
+    }
+
     packaging {
         resources {
             excludes += listOf(
@@ -93,11 +97,14 @@ dependencies {
     // Jetpack DataStore Preferences (First-launch User Name & Settings)
     implementation(libs.androidx.datastore.preferences)
 
-    // EncryptedSharedPreferences for API keys & IMAP credentials
+    // EncryptedSharedPreferences for API keys, Picovoice key & IMAP credentials
     implementation(libs.androidx.security.crypto)
 
     // OkHttp for resilient Gemini, Groq, and ElevenLabs HTTP requests
     implementation(libs.okhttp)
+
+    // Picovoice Porcupine SDK for custom wake word (.ppn) detection
+    implementation(libs.picovoice.porcupine)
 
     // Room Persistence
     implementation(libs.androidx.room.runtime)

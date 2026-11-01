@@ -13,6 +13,7 @@ work = "2.9.1"
 androidMail = "1.6.7"
 securityCrypto = "1.1.0-alpha06"
 okhttp = "4.12.0"
+porcupine = "3.0.3"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -35,6 +36,7 @@ androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx"
 sun-mail-android = { group = "com.sun.mail", name = "android-mail", version.ref = "androidMail" }
 sun-activation-android = { group = "com.sun.mail", name = "android-activation", version.ref = "androidMail" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+picovoice-porcupine = { group = "ai.picovoice", name = "porcupine-android", version.ref = "porcupine" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 
 [plugins]

@@ -1,0 +1,2 @@
+PLACEHOLDER_PICOVOICE_PORCUPINE_KEYWORD_MODEL
+Replace this file (app/src/main/assets/custom_wake_word.ppn) with your trained Android .ppn wake word binary downloaded from Picovoice Console (https://console.picovoice.ai/), or import a .ppn file directly in Settings.

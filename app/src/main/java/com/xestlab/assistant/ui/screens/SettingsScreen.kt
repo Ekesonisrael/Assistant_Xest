@@ -1,7 +1,16 @@
 package com.xestlab.assistant.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Typeface
+import android.os.Build
+import android.util.TypedValue
+import android.view.ViewGroup
+import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -22,10 +31,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -34,15 +45,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.xestlab.assistant.data.LlmProvider
 import com.xestlab.assistant.ui.theme.BgDark
 import com.xestlab.assistant.ui.theme.BorderDark
 import com.xestlab.assistant.ui.theme.CardShape8
 import com.xestlab.assistant.ui.theme.SurfaceDark
+import com.xestlab.assistant.ui.theme.SurfaceSubtleDark
 import com.xestlab.assistant.ui.theme.TealAccent
 import com.xestlab.assistant.ui.theme.TextMutedDark
 import com.xestlab.assistant.ui.theme.TextPrimaryDark
@@ -63,8 +77,23 @@ fun SettingsScreen(
     val goals by viewModel.goals.collectAsState()
     val reminders by viewModel.reminders.collectAsState()
     val facts by viewModel.allFacts.collectAsState()
-    val activeProvider by viewModel.activeProvider.collectAsState()
     val aiEnabledState by viewModel.aiEnabledState.collectAsState()
+    // Gemini temporarily disabled: val savedGeminiSummary by viewModel.savedGeminiSummary.collectAsState()
+    val savedGroqSummary by viewModel.savedGroqSummary.collectAsState()
+    val llmDiagnosticText by viewModel.llmTestDiagnosticText.collectAsState()
+    val llmDiagnosticIsError by viewModel.llmTestIsError.collectAsState()
+    val isThinking by viewModel.isThinking.collectAsState()
+
+    val wakeWordEnabledState by viewModel.wakeWordEnabledState.collectAsState()
+    val savedWakeWordName by viewModel.wakeWordNameState.collectAsState()
+    val savedPicovoiceSummary by viewModel.savedPicovoiceSummary.collectAsState()
+    val hasImportedPpn by viewModel.hasImportedPpn.collectAsState()
+    val wakeWordStatusText by viewModel.wakeWordStatusText.collectAsState()
+    val wakeWordStatusIsError by viewModel.wakeWordStatusIsError.collectAsState()
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshSavedKeySummaries()
+    }
 
     var nameField by remember(prefs.userName) { mutableStateOf(prefs.userName) }
     var wakeField by remember(prefs.wakeUpTime) { mutableStateOf(prefs.wakeUpTime) }
@@ -80,12 +109,15 @@ fun SettingsScreen(
 
     var showMemoryDialog by remember { mutableStateOf(false) }
 
-    // Dual LLM Encrypted Credentials (Gemini & Groq)
-    var selectedProvider by remember(activeProvider) { mutableStateOf(activeProvider) }
+    // Custom Wake Word & Picovoice Encrypted Credentials
+    var wakeWordEnabled by remember(wakeWordEnabledState) { mutableStateOf(wakeWordEnabledState) }
+    var wakeWordNameInput by remember(savedWakeWordName) { mutableStateOf(savedWakeWordName) }
+    var picovoiceKeyInput by remember { mutableStateOf("") }
+
+    // Primary Groq Encrypted Credentials (model hardcoded to "openai/gpt-oss-120b" in AiClient)
+    var selectedProvider by remember { mutableStateOf(LlmProvider.GROQ) }
     var aiEnabled by remember(aiEnabledState) { mutableStateOf(aiEnabledState) }
-    var geminiModel by remember { mutableStateOf(viewModel.securePrefs.geminiModel) }
-    var geminiKeyInput by remember { mutableStateOf("") }
-    var groqModel by remember { mutableStateOf(viewModel.securePrefs.groqModel) }
+    // Gemini temporarily disabled: var geminiKeyInput by remember { mutableStateOf("") }
     var groqKeyInput by remember { mutableStateOf("") }
 
     // ElevenLabs Encrypted Voice Key
@@ -101,6 +133,47 @@ fun SettingsScreen(
     var imapWifiOnly by remember { mutableStateOf(viewModel.securePrefs.isImapWifiOnly) }
 
     var pendingExportJson by remember { mutableStateOf<String?>(null) }
+
+    val wakePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val micGranted = grants[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+        if (micGranted) {
+            wakeWordEnabled = true
+            viewModel.saveWakeWordSettings(
+                enabled = true,
+                wakeWordNameInput = wakeWordNameInput,
+                picovoiceKeyInput = picovoiceKeyInput
+            )
+            picovoiceKeyInput = ""
+        } else {
+            wakeWordEnabled = false
+            Toast.makeText(
+                context,
+                "Microphone permission is required for background wake word listening.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    val ppnImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                if (bytes != null && bytes.isNotEmpty()) {
+                    viewModel.importCustomWakeWordPpn(bytes)
+                }
+            } catch (e: Exception) {
+                viewModel.setStatusBanner("Failed to import .ppn file: ${e.message}")
+            }
+        }
+    }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -157,17 +230,219 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.headlineMedium
             )
             Text(
-                text = "All API keys and IMAP passwords are encrypted with AES-256 EncryptedSharedPreferences.",
+                text = "All API keys, Picovoice keys, and IMAP passwords are encrypted with AES-256 EncryptedSharedPreferences.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextMutedDark
             )
         }
 
-        // 1. Dual LLM Routing (Gemini & Groq)
+        // 0. Custom Wake Word (Picovoice Porcupine + Jarvis Conversation Loop)
         item {
-            SettingsCard(title = "DUAL AI BRAIN (GEMINI & GROQ - ENCRYPTED)") {
+            SettingsCard(title = "CUSTOM WAKE WORD (PICOVOICE PORCUPINE - JARVIS LOOP)") {
                 SettingsSwitchRow(
-                    label = "Route Chat & Voice to AI Coach",
+                    label = "Enable Background Wake Word (Auto-Start on Boot)",
+                    checked = wakeWordEnabled,
+                    onCheckedChange = { wantEnabled ->
+                        if (wantEnabled) {
+                            val hasMic = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (hasMic) {
+                                wakeWordEnabled = true
+                                viewModel.setWakeWordEnabled(
+                                    enabled = true,
+                                    wakeWordNameDraft = wakeWordNameInput,
+                                    picovoiceKeyDraft = picovoiceKeyInput
+                                )
+                                picovoiceKeyInput = ""
+                            } else {
+                                val perms = buildList {
+                                    add(Manifest.permission.RECORD_AUDIO)
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        add(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                }
+                                wakePermissionLauncher.launch(perms.toTypedArray())
+                            }
+                        } else {
+                            wakeWordEnabled = false
+                            viewModel.setWakeWordEnabled(
+                                enabled = false,
+                                wakeWordNameDraft = wakeWordNameInput,
+                                picovoiceKeyDraft = picovoiceKeyInput
+                            )
+                        }
+                    }
+                )
+
+                SettingsTextField(
+                    value = wakeWordNameInput,
+                    onValueChange = { wakeWordNameInput = it },
+                    label = "Wake Word Name (e.g., Hades, Jarvis, Cynthia)"
+                )
+
+                SecretKeyTextField(
+                    value = picovoiceKeyInput,
+                    onValueChange = { picovoiceKeyInput = it },
+                    label = if (savedPicovoiceSummary != "None saved") {
+                        "Picovoice Access Key (Saved: $savedPicovoiceSummary)"
+                    } else {
+                        "Picovoice Access Key"
+                    }
+                )
+
+                Text(
+                    text = "SecurePrefs Picovoice Key: $savedPicovoiceSummary",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (savedPicovoiceSummary != "None saved") TealAccent else WarningRed
+                )
+
+                Text(
+                    text = if (hasImportedPpn) {
+                        "Keyword Model: Custom imported .ppn active (overrides assets/custom_wake_word.ppn)"
+                    } else {
+                        "Keyword Model: Bundled assets/custom_wake_word.ppn"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextMutedDark
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val hasMic = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (!hasMic) {
+                                Toast.makeText(
+                                    context,
+                                    "Grant Microphone permission first.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                val perms = buildList {
+                                    add(Manifest.permission.RECORD_AUDIO)
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        add(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                }
+                                wakePermissionLauncher.launch(perms.toTypedArray())
+                            } else {
+                                viewModel.testJarvisLoopFromSettings(
+                                    wakeWordNameDraft = wakeWordNameInput,
+                                    picovoiceKeyDraft = picovoiceKeyInput
+                                )
+                                picovoiceKeyInput = ""
+                            }
+                        },
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Test Jarvis Loop", color = TealAccent)
+                    }
+
+                    Button(
+                        onClick = {
+                            val hasMic = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (wakeWordEnabled && !hasMic) {
+                                val perms = buildList {
+                                    add(Manifest.permission.RECORD_AUDIO)
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        add(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                }
+                                wakePermissionLauncher.launch(perms.toTypedArray())
+                            } else {
+                                viewModel.saveWakeWordSettings(
+                                    enabled = wakeWordEnabled,
+                                    wakeWordNameInput = wakeWordNameInput,
+                                    picovoiceKeyInput = picovoiceKeyInput
+                                )
+                                picovoiceKeyInput = ""
+                            }
+                        },
+                        shape = CardShape8,
+                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Save Wake Word", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { ppnImportLauncher.launch(arrayOf("*/*")) },
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, BorderDark),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Import Custom .ppn File", color = TextPrimaryDark)
+                    }
+                    if (hasImportedPpn) {
+                        OutlinedButton(
+                            onClick = { viewModel.clearImportedWakeWordPpn() },
+                            shape = CardShape8,
+                            border = BorderStroke(1.dp, WarningRed),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Use Asset .ppn", color = WarningRed)
+                        }
+                    }
+                }
+
+                Surface(
+                    color = SurfaceSubtleDark,
+                    shape = CardShape8,
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (wakeWordStatusIsError) WarningRed else BorderDark
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val errorColorArgb = WarningRed.toArgb()
+                    val okColorArgb = TealAccent.toArgb()
+                    AndroidView(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        factory = { ctx ->
+                            TextView(ctx).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT
+                                )
+                                typeface = Typeface.MONOSPACE
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                                setTextIsSelectable(true)
+                            }
+                        },
+                        update = { textView ->
+                            textView.text = wakeWordStatusText
+                            textView.setTextColor(
+                                if (wakeWordStatusIsError) errorColorArgb else okColorArgb
+                            )
+                        }
+                    )
+                }
+            }
+        }
+
+        // 1. Primary Groq AI Brain (Gemini Temporarily Disabled)
+        item {
+            SettingsCard(title = "AI BRAIN — GROQ PRIMARY (OPENAI/GPT-OSS-120B)") {
+                SettingsSwitchRow(
+                    label = "Route Chat & Voice to Groq AI Coach",
                     checked = aiEnabled,
                     onCheckedChange = {
                         aiEnabled = it
@@ -176,7 +451,7 @@ fun SettingsScreen(
                 )
 
                 Text(
-                    text = "Active LLM Provider",
+                    text = "Active LLM Provider (Default: Groq — openai/gpt-oss-120b)",
                     style = MaterialTheme.typography.labelMedium,
                     color = TextMutedDark
                 )
@@ -185,125 +460,101 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    val isGemini = selectedProvider == LlmProvider.GEMINI
-                    if (isGemini) {
-                        Button(
-                            onClick = {
-                                selectedProvider = LlmProvider.GEMINI
-                                viewModel.setLlmProvider(LlmProvider.GEMINI)
-                            },
-                            shape = CardShape8,
-                            colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Gemini", color = BgDark, fontWeight = FontWeight.SemiBold)
-                        }
-                    } else {
-                        OutlinedButton(
-                            onClick = {
-                                selectedProvider = LlmProvider.GEMINI
-                                viewModel.setLlmProvider(LlmProvider.GEMINI)
-                            },
-                            shape = CardShape8,
-                            border = BorderStroke(1.dp, BorderDark),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Gemini", color = TextPrimaryDark)
-                        }
+                    Button(
+                        onClick = {
+                            selectedProvider = LlmProvider.GROQ
+                            viewModel.setLlmProvider(LlmProvider.GROQ)
+                        },
+                        shape = CardShape8,
+                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Groq (Active)", color = BgDark, fontWeight = FontWeight.SemiBold)
                     }
 
-                    val isGroq = selectedProvider == LlmProvider.GROQ
-                    if (isGroq) {
-                        Button(
-                            onClick = {
-                                selectedProvider = LlmProvider.GROQ
-                                viewModel.setLlmProvider(LlmProvider.GROQ)
-                            },
-                            shape = CardShape8,
-                            colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Groq (Llama 3 70B)", color = BgDark, fontWeight = FontWeight.SemiBold)
-                        }
-                    } else {
-                        OutlinedButton(
-                            onClick = {
-                                selectedProvider = LlmProvider.GROQ
-                                viewModel.setLlmProvider(LlmProvider.GROQ)
-                            },
-                            shape = CardShape8,
-                            border = BorderStroke(1.dp, BorderDark),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Groq (Llama 3 70B)", color = TextPrimaryDark)
-                        }
+                    // Gemini kept in UI as disabled until cloud permission issues are resolved
+                    OutlinedButton(
+                        onClick = {},
+                        enabled = false,
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, BorderDark),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Gemini (Disabled)", color = TextMutedDark)
                     }
                 }
 
-                if (selectedProvider == LlmProvider.GEMINI) {
-                    SettingsTextField(
-                        value = geminiModel,
-                        onValueChange = { geminiModel = it },
-                        label = "Gemini Model"
-                    )
-                    SecretKeyTextField(
-                        value = geminiKeyInput,
-                        onValueChange = { geminiKeyInput = it },
-                        label = if (viewModel.securePrefs.hasGeminiKey()) {
-                            "Gemini API Key (Encrypted & Saved - enter new to replace)"
-                        } else {
-                            "Gemini API Key"
-                        }
-                    )
-                } else {
-                    SettingsTextField(
-                        value = groqModel,
-                        onValueChange = { groqModel = it },
-                        label = "Groq Model (default: llama3-70b-8192)"
-                    )
-                    SecretKeyTextField(
-                        value = groqKeyInput,
-                        onValueChange = { groqKeyInput = it },
-                        label = if (viewModel.securePrefs.hasGroqKey()) {
-                            "Groq API Key (Encrypted & Saved - enter new to replace)"
-                        } else {
-                            "Groq API Key (Bearer)"
-                        }
-                    )
-                }
+                /*
+                 * Gemini API Key field commented out while Groq is the primary engine:
+                 * SecretKeyTextField(
+                 *     value = geminiKeyInput,
+                 *     onValueChange = { geminiKeyInput = it },
+                 *     label = "Gemini API Key"
+                 * )
+                 */
+
+                SecretKeyTextField(
+                    value = groqKeyInput,
+                    onValueChange = { groqKeyInput = it },
+                    label = if (savedGroqSummary != "None saved") {
+                        "Groq API Key (Saved: $savedGroqSummary)"
+                    } else {
+                        "Groq API Key (Bearer)"
+                    }
+                )
+                Text(
+                    text = "SecurePrefs Groq Key: $savedGroqSummary",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (savedGroqSummary != "None saved") TealAccent else WarningRed
+                )
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedButton(
+                        enabled = !isThinking,
                         onClick = {
+                            val resolvedKey = viewModel.resolveApiKeyForTest(
+                                provider = LlmProvider.GROQ,
+                                groqKeyDraft = groqKeyInput
+                            )
+                            if (resolvedKey.isNullOrEmpty()) {
+                                Toast.makeText(
+                                    context,
+                                    "No API key found. Save it first.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                viewModel.setDiagnosticError("No API key found. Save it first.")
+                                return@OutlinedButton
+                            }
+
+                            if (groqKeyInput.isNotBlank()) {
+                                groqKeyInput = ""
+                            }
+
                             viewModel.testActiveLlmConnection(
-                                provider = selectedProvider,
-                                geminiKeyDraft = geminiKeyInput,
-                                geminiModelDraft = geminiModel,
-                                groqKeyDraft = groqKeyInput,
-                                groqModelDraft = groqModel
+                                provider = LlmProvider.GROQ,
+                                resolvedKey = resolvedKey
                             )
                         },
                         shape = CardShape8,
                         border = BorderStroke(1.dp, TealAccent),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Test ${selectedProvider.name}", color = TealAccent)
+                        Text(
+                            text = if (isThinking) "Testing..." else "Test ${selectedProvider.name}",
+                            color = TealAccent
+                        )
                     }
 
                     Button(
                         onClick = {
                             viewModel.saveLlmSettings(
                                 aiEnabled = aiEnabled,
-                                provider = selectedProvider,
-                                geminiKeyInput = geminiKeyInput,
-                                geminiModel = geminiModel,
-                                groqKeyInput = groqKeyInput,
-                                groqModel = groqModel
+                                provider = LlmProvider.GROQ,
+                                groqKeyInput = groqKeyInput
                             )
-                            geminiKeyInput = ""
                             groqKeyInput = ""
                             aiEnabled = viewModel.securePrefs.isAiEnabled
                         },
@@ -313,6 +564,43 @@ fun SettingsScreen(
                     ) {
                         Text("Save Encrypted", color = BgDark, fontWeight = FontWeight.SemiBold)
                     }
+                }
+
+                // Native Android TextView directly under the Test buttons displaying the exact
+                // HTTP status code (e.g. 200, 401, 400) or Exception (UnknownHostException, etc.)
+                Surface(
+                    color = SurfaceSubtleDark,
+                    shape = CardShape8,
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (llmDiagnosticIsError) WarningRed else BorderDark
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val errorColorArgb = WarningRed.toArgb()
+                    val okColorArgb = TealAccent.toArgb()
+                    AndroidView(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        factory = { ctx ->
+                            TextView(ctx).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT
+                                )
+                                typeface = Typeface.MONOSPACE
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                                setTextIsSelectable(true)
+                            }
+                        },
+                        update = { textView ->
+                            textView.text = llmDiagnosticText
+                            textView.setTextColor(
+                                if (llmDiagnosticIsError) errorColorArgb else okColorArgb
+                            )
+                        }
+                    )
                 }
             }
         }

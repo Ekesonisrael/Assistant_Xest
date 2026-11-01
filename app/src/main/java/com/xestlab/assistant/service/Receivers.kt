@@ -342,6 +342,9 @@ class BootReceiver : BroadcastReceiver() {
                 if (securePrefs.isImapEnabled && securePrefs.imapUser.isNotBlank()) {
                     EmailHelper.schedulePeriodicChecks(context, securePrefs.isImapWifiOnly)
                 }
+                if (securePrefs.isWakeWordEnabled) {
+                    WakeWordService.start(context)
+                }
             } finally {
                 pendingResult.finish()
             }

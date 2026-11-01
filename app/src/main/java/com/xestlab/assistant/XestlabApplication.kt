@@ -11,6 +11,7 @@ import com.xestlab.assistant.service.AlarmReceiver
 import com.xestlab.assistant.service.AlarmScheduler
 import com.xestlab.assistant.service.EmailHelper
 import com.xestlab.assistant.service.VoiceReminderService
+import com.xestlab.assistant.service.WakeWordService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -44,6 +45,9 @@ class XestlabApplication : Application() {
             if (securePrefs.isImapEnabled && securePrefs.imapUser.isNotBlank() && securePrefs.imapPassword.isNotBlank()) {
                 EmailHelper.schedulePeriodicChecks(this@XestlabApplication, securePrefs.isImapWifiOnly)
             }
+            if (securePrefs.isWakeWordEnabled) {
+                WakeWordService.start(this@XestlabApplication)
+            }
         }
     }
 
@@ -56,6 +60,15 @@ class XestlabApplication : Application() {
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Spoken daily plan briefings via ElevenLabs or Android TextToSpeech"
+        }
+
+        val wakeWordChannel = NotificationChannel(
+            WakeWordService.CHANNEL_ID,
+            "Background Wake Word Service",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Persistent background wake word listener (Picovoice Porcupine)"
+            setShowBadge(false)
         }
 
         val headsUpChannel = NotificationChannel(
@@ -76,6 +89,7 @@ class XestlabApplication : Application() {
         }
 
         manager.createNotificationChannel(voiceChannel)
+        manager.createNotificationChannel(wakeWordChannel)
         manager.createNotificationChannel(headsUpChannel)
         manager.createNotificationChannel(emailChannel)
     }

@@ -19,8 +19,23 @@ import java.util.concurrent.TimeUnit
 
 data class AssistantResponse(
     val replyText: String,
-    val providerUsed: LlmProvider
+    val providerUsed: LlmProvider,
+    val modelUsed: String
 )
+
+data class ApiDiagnosticResult(
+    val provider: LlmProvider,
+    val modelUsed: String,
+    val statusCode: Int,
+    val replyText: String
+)
+
+class ApiHttpException(
+    val provider: String,
+    val statusCode: Int,
+    val statusMessage: String,
+    val errorDetail: String
+) : Exception("HTTP $statusCode ($provider ${statusMessage.ifBlank { "Error" }}): $errorDetail")
 
 data class EmailAnalysisResult(
     val isActionable: Boolean,
@@ -29,6 +44,12 @@ data class EmailAnalysisResult(
 )
 
 object AiClient {
+
+    const val GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+    const val GROQ_MODEL = "openai/gpt-oss-120b"
+
+    // Kept for future re-enabling once Gemini cloud permissions are resolved:
+    // const val GEMINI_MODEL = "gemini-1.5-flash-latest"
 
     const val SYSTEM_COACH_PROMPT =
         "You are Xestlab Assistant, a strict but supportive business coach for King Israel. Keep replies conversational, short, and punchy."
@@ -41,10 +62,24 @@ object AiClient {
     val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(45, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(60, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
+    }
+
+    fun formatThrowableDiagnostic(error: Throwable): String {
+        return when (error) {
+            is ApiHttpException -> {
+                "HTTP ${error.statusCode} [${error.provider}]: ${error.errorDetail}"
+            }
+            else -> {
+                val className = error.javaClass.simpleName.ifBlank { error.javaClass.name }
+                val msg = error.message?.takeIf { it.isNotBlank() } ?: error.toString()
+                "$className: $msg"
+            }
+        }
     }
 
     suspend fun buildLocalContext(db: AppDatabase, prefs: UserPreferencesState): String {
@@ -94,8 +129,8 @@ object AiClient {
     }
 
     /**
-     * Routes user voice/chat input to either Gemini or Groq depending on SecurePreferences.llmProvider.
-     * Wrapped in strict try/catch with OkHttp timeouts so it never crashes.
+     * Primary AI Engine: Routes all chat and microphone prompts to Groq ("openai/gpt-oss-120b"),
+     * reading the API key strictly from EncryptedSharedPreferences.
      */
     suspend fun generateAssistantResponse(
         userPrompt: String,
@@ -104,45 +139,57 @@ object AiClient {
         securePrefs: SecurePreferences
     ): Result<AssistantResponse> = withContext(Dispatchers.IO) {
         try {
-            val provider = securePrefs.llmProvider
             val localContext = buildLocalContext(db, prefs)
-            val fullSystemInstruction = buildString {
+            val customWakeName = securePrefs.wakeWordName
+            val combinedUserText = buildString {
                 appendLine(SYSTEM_COACH_PROMPT)
-                appendLine("Do not use markdown asterisks, bullet symbols, or emojis because your response is spoken aloud.")
+                if (customWakeName.isNotBlank()) {
+                    appendLine("Your user-configured assistant wake word name is \"$customWakeName\". Respond naturally as $customWakeName when addressed by that name.")
+                }
+                appendLine("Reply in plain spoken sentences with no markdown, backticks, asterisks, or emojis because your reply will be spoken aloud via TextToSpeech.")
                 appendLine()
-                appendLine("Live Workspace Context:")
-                append(localContext)
+                appendLine("Workspace Context:")
+                appendLine(localContext)
+                appendLine("User message: $userPrompt")
             }
 
-            when (provider) {
-                LlmProvider.GEMINI -> {
-                    val key = securePrefs.geminiApiKey
-                    if (key.isBlank()) {
-                        return@withContext Result.failure(IllegalStateException("Missing Gemini API key"))
-                    }
-                    val textResult = callGeminiWithFallback(
-                        apiKey = key,
-                        model = securePrefs.geminiModel,
-                        systemPrompt = fullSystemInstruction,
-                        userMessage = userPrompt
-                    )
-                    textResult.map { AssistantResponse(replyText = sanitizeForSpeech(it), providerUsed = LlmProvider.GEMINI) }
-                }
+            val groqKey = securePrefs.getKeyForProvider(LlmProvider.GROQ)
+                ?: return@withContext Result.failure(
+                    IllegalStateException("No Groq API key found in EncryptedSharedPreferences.")
+                )
 
-                LlmProvider.GROQ -> {
-                    val key = securePrefs.groqApiKey
-                    if (key.isBlank()) {
-                        return@withContext Result.failure(IllegalStateException("Missing Groq API key"))
-                    }
-                    val textResult = callGroqOpenAiCompat(
-                        apiKey = key,
-                        model = securePrefs.groqModel,
-                        systemPrompt = fullSystemInstruction,
-                        userMessage = userPrompt
-                    )
-                    textResult.map { AssistantResponse(replyText = sanitizeForSpeech(it), providerUsed = LlmProvider.GROQ) }
-                }
+            executeGroqPost(
+                rawApiKey = groqKey,
+                userText = combinedUserText
+            ).map { diag ->
+                AssistantResponse(
+                    replyText = sanitizeForSpeech(diag.replyText),
+                    providerUsed = LlmProvider.GROQ,
+                    modelUsed = GROQ_MODEL
+                )
             }
+
+            /*
+             * GEMINI ROUTING TEMPORARILY DISABLED (Cloud permission issues):
+             *
+             * LlmProvider.GEMINI -> {
+             *     val key = securePrefs.getKeyForProvider(LlmProvider.GEMINI)
+             *         ?: return@withContext Result.failure(
+             *             IllegalStateException("No Gemini API key found in EncryptedSharedPreferences.")
+             *         )
+             *     executeGeminiPost(
+             *         rawApiKey = key,
+             *         systemPrompt = fullSystemInstruction,
+             *         userMessage = userPrompt
+             *     ).map { diag ->
+             *         AssistantResponse(
+             *             replyText = sanitizeForSpeech(diag.replyText),
+             *             providerUsed = LlmProvider.GEMINI,
+             *             modelUsed = GEMINI_MODEL
+             *         )
+             *     }
+             * }
+             */
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -154,7 +201,7 @@ object AiClient {
         prefs: UserPreferencesState,
         securePrefs: SecurePreferences
     ): String? = withContext(Dispatchers.IO) {
-        if (!securePrefs.isAiEnabled || !securePrefs.hasActiveLlmKey()) {
+        if (!securePrefs.isAiEnabled || !securePrefs.hasGroqKey()) {
             return@withContext null
         }
         val displayName = prefs.userName.ifBlank { "King Israel" }
@@ -168,42 +215,35 @@ object AiClient {
         snippet: String,
         securePrefs: SecurePreferences
     ): EmailAnalysisResult = withContext(Dispatchers.IO) {
-        // If AI brain is configured and enabled, ask the active LLM to classify and extract clean task title
-        if (securePrefs.isAiEnabled && securePrefs.hasActiveLlmKey()) {
-            val aiAttempt = tryExtractEmailViaLlm(sender, subject, snippet, securePrefs)
+        if (securePrefs.isAiEnabled && securePrefs.hasGroqKey()) {
+            val aiAttempt = tryExtractEmailViaGroq(sender, subject, snippet, securePrefs)
             if (aiAttempt != null) {
                 return@withContext aiAttempt
             }
         }
-        // Deterministic local fallback so Smart Email Checker works offline or without AI keys
         heuristicEmailAnalysis(sender, subject, snippet)
     }
 
-    private fun tryExtractEmailViaLlm(
+    private fun tryExtractEmailViaGroq(
         sender: String,
         subject: String,
         snippet: String,
         securePrefs: SecurePreferences
     ): EmailAnalysisResult? {
         return try {
-            val system = "Extract actionable tasks or invoices from emails. Reply ONLY with compact JSON: {\"actionable\":true|false,\"category\":\"TASK\"|\"INVOICE\"|\"GENERAL\",\"taskTitle\":\"short actionable task title\"}."
-            val user = "From: $sender\nSubject: $subject\nBody: ${snippet.take(400)}"
+            val key = securePrefs.getKeyForProvider(LlmProvider.GROQ) ?: return null
+            val prompt = buildString {
+                appendLine("Extract actionable tasks or invoices from this email.")
+                appendLine("Reply ONLY with compact JSON: {\"actionable\":true|false,\"category\":\"TASK\"|\"INVOICE\"|\"GENERAL\",\"taskTitle\":\"short actionable task title\"}.")
+                appendLine("From: $sender")
+                appendLine("Subject: $subject")
+                append("Body: ${snippet.take(400)}")
+            }
 
-            val rawReply = when (securePrefs.llmProvider) {
-                LlmProvider.GEMINI -> callGeminiWithFallback(
-                    apiKey = securePrefs.geminiApiKey,
-                    model = securePrefs.geminiModel,
-                    systemPrompt = system,
-                    userMessage = user
-                ).getOrNull()
-
-                LlmProvider.GROQ -> callGroqOpenAiCompat(
-                    apiKey = securePrefs.groqApiKey,
-                    model = securePrefs.groqModel,
-                    systemPrompt = system,
-                    userMessage = user
-                ).getOrNull()
-            } ?: return null
+            val rawReply = executeGroqPost(
+                rawApiKey = key,
+                userText = prompt
+            ).getOrNull()?.replyText ?: return null
 
             val jsonStart = rawReply.indexOf('{')
             val jsonEnd = rawReply.lastIndexOf('}')
@@ -258,154 +298,51 @@ object AiClient {
         }
     }
 
-    suspend fun testGeminiConnection(apiKey: String, model: String): Result<String> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) {
-            return@withContext Result.failure(IllegalArgumentException("Gemini API key is empty."))
-        }
-        callGeminiWithFallback(
-            apiKey = apiKey.trim(),
-            model = model.trim().ifBlank { "gemini-2.5-flash" },
-            systemPrompt = SYSTEM_COACH_PROMPT,
-            userMessage = "Say 'Gemini brain online for King Israel' in one short sentence."
-        )
-    }
-
-    suspend fun testGroqConnection(apiKey: String, model: String): Result<String> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) {
-            return@withContext Result.failure(IllegalArgumentException("Groq API key is empty."))
-        }
-        callGroqOpenAiCompat(
-            apiKey = apiKey.trim(),
-            model = model.trim().ifBlank { "llama3-70b-8192" },
-            systemPrompt = SYSTEM_COACH_PROMPT,
-            userMessage = "Say 'Groq brain online for King Israel' in one short sentence."
-        )
-    }
-
-    private fun callGeminiWithFallback(
-        apiKey: String,
-        model: String,
-        systemPrompt: String,
-        userMessage: String
-    ): Result<String> {
-        val primaryModel = model.trim().ifBlank { "gemini-2.5-flash" }
-        val firstTry = executeGeminiPost(apiKey, primaryModel, systemPrompt, userMessage)
-        if (firstTry.isSuccess || primaryModel == "gemini-2.5-flash") {
-            return firstTry
-        }
-        return executeGeminiPost(apiKey, "gemini-2.5-flash", systemPrompt, userMessage)
-    }
-
-    private fun executeGeminiPost(
-        apiKey: String,
-        model: String,
-        systemPrompt: String,
-        userMessage: String
-    ): Result<String> {
-        return try {
-            val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${apiKey.trim()}"
-            val payload = JSONObject().apply {
-                put(
-                    "systemInstruction",
-                    JSONObject().put(
-                        "parts",
-                        JSONArray().put(JSONObject().put("text", systemPrompt))
-                    )
-                )
-                put(
-                    "contents",
-                    JSONArray().put(
-                        JSONObject()
-                            .put("role", "user")
-                            .put("parts", JSONArray().put(JSONObject().put("text", userMessage)))
-                    )
-                )
-                put(
-                    "generationConfig",
-                    JSONObject()
-                        .put("temperature", 0.5)
-                        .put("maxOutputTokens", 280)
+    suspend fun testGroqConnection(apiKey: String): Result<ApiDiagnosticResult> =
+        withContext(Dispatchers.IO) {
+            val cleanKey = SecurePreferences.sanitizeApiKey(apiKey)
+            if (cleanKey.isBlank()) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("No API key found. Save it first.")
                 )
             }
-
-            val request = Request.Builder()
-                .url(endpoint)
-                .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
-                .header("Content-Type", "application/json")
-                .build()
-
-            httpClient.newCall(request).execute().use { response ->
-                val bodyStr = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    return Result.failure(IllegalStateException("Gemini HTTP ${response.code}: ${bodyStr.take(180)}"))
-                }
-                val json = JSONObject(bodyStr)
-                val candidates = json.optJSONArray("candidates")
-                    ?: return Result.failure(IllegalStateException("Empty Gemini candidates"))
-                if (candidates.length() == 0) {
-                    return Result.failure(IllegalStateException("Zero Gemini candidates"))
-                }
-                val parts = candidates.getJSONObject(0)
-                    .optJSONObject("content")
-                    ?.optJSONArray("parts")
-                    ?: return Result.failure(IllegalStateException("Missing Gemini content parts"))
-                val text = parts.optJSONObject(0)?.optString("text", "")?.trim().orEmpty()
-                if (text.isEmpty()) {
-                    Result.failure(IllegalStateException("Blank Gemini response"))
-                } else {
-                    Result.success(text)
-                }
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
+            executeGroqPost(
+                rawApiKey = cleanKey,
+                userText = "Reply in one short spoken sentence: Groq brain online and ready for King Israel."
+            )
         }
-    }
 
     /**
-     * Groq OpenAI-compatible POST to https://api.groq.com/openai/v1/chat/completions
-     * with Authorization: Bearer <Groq_API_Key> and model llama3-70b-8192.
+     * Groq API Service:
+     * - URL: https://api.groq.com/openai/v1/chat/completions
+     * - Headers: Authorization: Bearer <key>, Content-Type: application/json
+     * - Model: Hardcoded to "openai/gpt-oss-120b"
+     * - JSON Body built cleanly with JSONObject:
+     *   {"model": "openai/gpt-oss-120b", "messages": [{"role": "user", "content": "YOUR_TEXT_HERE"}]}
+     * - Response Parsing: choices[0].message.content
      */
-    private fun callGroqOpenAiCompat(
-        apiKey: String,
-        model: String,
-        systemPrompt: String,
-        userMessage: String
-    ): Result<String> {
-        val requestedModel = model.trim().ifBlank { "llama3-70b-8192" }
-        val firstAttempt = executeGroqPost(apiKey, requestedModel, systemPrompt, userMessage)
-        if (firstAttempt.isSuccess) {
-            return firstAttempt
-        }
-        // If Groq returns model_decommissioned for legacy model alias, retry seamlessly with llama-3.3-70b-versatile
-        val errMsg = firstAttempt.exceptionOrNull()?.message.orEmpty()
-        if (requestedModel == "llama3-70b-8192" && errMsg.contains("decommission", ignoreCase = true)) {
-            return executeGroqPost(apiKey, "llama-3.3-70b-versatile", systemPrompt, userMessage)
-        }
-        return firstAttempt
-    }
-
     private fun executeGroqPost(
-        apiKey: String,
-        model: String,
-        systemPrompt: String,
-        userMessage: String
-    ): Result<String> {
+        rawApiKey: String,
+        userText: String
+    ): Result<ApiDiagnosticResult> {
         return try {
+            val apiKey = SecurePreferences.sanitizeApiKey(rawApiKey)
+
+            val userMessageObject = JSONObject().apply {
+                put("role", "user")
+                put("content", userText)
+            }
+            val messagesArray = JSONArray().apply {
+                put(userMessageObject)
+            }
             val payload = JSONObject().apply {
-                put("model", model)
-                put(
-                    "messages",
-                    JSONArray()
-                        .put(JSONObject().put("role", "system").put("content", systemPrompt))
-                        .put(JSONObject().put("role", "user").put("content", userMessage))
-                )
-                put("temperature", 0.5)
-                put("max_tokens", 280)
+                put("model", GROQ_MODEL)
+                put("messages", messagesArray)
             }
 
             val request = Request.Builder()
-                .url("https://api.groq.com/openai/v1/chat/completions")
-                .header("Authorization", "Bearer ${apiKey.trim()}")
+                .url(GROQ_URL)
+                .header("Authorization", "Bearer $apiKey")
                 .header("Content-Type", "application/json")
                 .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
@@ -413,34 +350,176 @@ object AiClient {
             httpClient.newCall(request).execute().use { response ->
                 val bodyStr = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    return Result.failure(IllegalStateException("Groq HTTP ${response.code}: ${bodyStr.take(180)}"))
+                    val detail = extractReadableApiError(bodyStr)
+                    return Result.failure(
+                        ApiHttpException(
+                            provider = "GROQ/$GROQ_MODEL",
+                            statusCode = response.code,
+                            statusMessage = response.message,
+                            errorDetail = detail
+                        )
+                    )
                 }
+
                 val json = JSONObject(bodyStr)
                 val choices = json.optJSONArray("choices")
-                    ?: return Result.failure(IllegalStateException("Missing choices in Groq response"))
+                    ?: return Result.failure(IllegalStateException("Groq HTTP 200 missing 'choices' array"))
                 if (choices.length() == 0) {
-                    return Result.failure(IllegalStateException("Empty choices in Groq response"))
+                    return Result.failure(IllegalStateException("Groq HTTP 200 empty 'choices' array"))
                 }
                 val messageObj = choices.getJSONObject(0).optJSONObject("message")
-                    ?: return Result.failure(IllegalStateException("Missing message in Groq choice"))
+                    ?: return Result.failure(IllegalStateException("Groq HTTP 200 missing 'message' object"))
                 val content = messageObj.optString("content", "").trim()
                 if (content.isEmpty()) {
-                    Result.failure(IllegalStateException("Blank Groq message content"))
+                    Result.failure(IllegalStateException("Groq HTTP 200 blank choices[0].message.content"))
                 } else {
-                    Result.success(content)
+                    Result.success(
+                        ApiDiagnosticResult(
+                            provider = LlmProvider.GROQ,
+                            modelUsed = GROQ_MODEL,
+                            statusCode = response.code,
+                            replyText = content
+                        )
+                    )
                 }
             }
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    /*
+     * =========================================================================================
+     * GEMINI API SERVICE — TEMPORARILY DISABLED (Cloud permission issues)
+     * Preserved for future re-activation.
+     * =========================================================================================
+     *
+     * suspend fun testGeminiConnection(apiKey: String): Result<ApiDiagnosticResult> =
+     *     withContext(Dispatchers.IO) {
+     *         val cleanKey = SecurePreferences.sanitizeApiKey(apiKey)
+     *         if (cleanKey.isBlank()) {
+     *             return@withContext Result.failure(
+     *                 IllegalArgumentException("No API key found. Save it first.")
+     *             )
+     *         }
+     *         executeGeminiPost(
+     *             rawApiKey = cleanKey,
+     *             systemPrompt = SYSTEM_COACH_PROMPT,
+     *             userMessage = "Reply in one short sentence: Gemini brain online for King Israel."
+     *         )
+     *     }
+     *
+     * private fun executeGeminiPost(
+     *     rawApiKey: String,
+     *     systemPrompt: String,
+     *     userMessage: String
+     * ): Result<ApiDiagnosticResult> {
+     *     return try {
+     *         val apiKey = SecurePreferences.sanitizeApiKey(rawApiKey)
+     *         val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$apiKey"
+     *         val combinedPrompt = "$systemPrompt\n\nUser: $userMessage"
+     *
+     *         val payload = JSONObject().apply {
+     *             put(
+     *                 "contents",
+     *                 JSONArray().put(
+     *                     JSONObject().put(
+     *                         "parts",
+     *                         JSONArray().put(JSONObject().put("text", combinedPrompt))
+     *                     )
+     *                 )
+     *             )
+     *             put(
+     *                 "generationConfig",
+     *                 JSONObject()
+     *                     .put("temperature", 0.5)
+     *                     .put("maxOutputTokens", 400)
+     *             )
+     *         }
+     *
+     *         val request = Request.Builder()
+     *             .url(endpoint)
+     *             .header("Content-Type", "application/json")
+     *             .header("Accept", "application/json")
+     *             .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+     *             .build()
+     *
+     *         httpClient.newCall(request).execute().use { response ->
+     *             val bodyStr = response.body?.string().orEmpty()
+     *             if (!response.isSuccessful) {
+     *                 val detail = extractReadableApiError(bodyStr)
+     *                 return Result.failure(
+     *                     ApiHttpException(
+     *                         provider = "GEMINI/gemini-1.5-flash-latest",
+     *                         statusCode = response.code,
+     *                         statusMessage = response.message,
+     *                         errorDetail = detail
+     *                     )
+     *                 )
+     *             }
+     *             val json = JSONObject(bodyStr)
+     *             val candidates = json.optJSONArray("candidates")
+     *             if (candidates == null || candidates.length() == 0) {
+     *                 return Result.failure(IllegalStateException("Gemini HTTP 200 but zero candidates"))
+     *             }
+     *             val firstCandidate = candidates.getJSONObject(0)
+     *             val parts = firstCandidate.optJSONObject("content")?.optJSONArray("parts")
+     *             val combinedText = buildString {
+     *                 if (parts != null) {
+     *                     for (i in 0 until parts.length()) {
+     *                         val t = parts.optJSONObject(i)?.optString("text", "")?.trim().orEmpty()
+     *                         if (t.isNotEmpty()) {
+     *                             if (isNotEmpty()) append(" ")
+     *                             append(t)
+     *                         }
+     *                     }
+     *                 }
+     *             }.trim()
+     *             Result.success(
+     *                 ApiDiagnosticResult(
+     *                     provider = LlmProvider.GEMINI,
+     *                     modelUsed = "gemini-1.5-flash-latest",
+     *                     statusCode = response.code,
+     *                     replyText = combinedText
+     *                 )
+     *             )
+     *         }
+     *     } catch (e: Exception) {
+     *         Result.failure(e)
+     *     }
+     * }
+     */
+
+    private fun extractReadableApiError(rawBody: String): String {
+        val trimmed = rawBody.trim()
+        if (trimmed.isEmpty()) return "Empty error body from server"
+        return try {
+            val root = JSONObject(trimmed)
+            val errObj = root.optJSONObject("error")
+            if (errObj != null) {
+                val code = errObj.optString("code", "").ifBlank { errObj.optString("status", "") }
+                val message = errObj.optString("message", "").trim()
+                if (message.isNotEmpty()) {
+                    if (code.isNotEmpty()) "[$code] $message" else message
+                } else {
+                    trimmed.take(400)
+                }
+            } else {
+                trimmed.take(400)
+            }
+        } catch (_: Exception) {
+            trimmed.replace(Regex("\\s+"), " ").take(400)
         }
     }
 
     private fun sanitizeForSpeech(raw: String): String {
         return raw
+            .replace("```", " ")
             .replace("**", "")
             .replace("*", "")
             .replace("#", "")
             .replace("`", "")
+            .replace("|", " ")
             .replace(Regex("\\s{2,}"), " ")
             .trim()
     }

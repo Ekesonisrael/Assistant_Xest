@@ -62,6 +62,11 @@ class VoiceEngine(
             if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
                 engine.setLanguage(Locale.US)
             }
+            val speechAttrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            engine.setAudioAttributes(speechAttrs)
             engine.setPitch(DEFAULT_FALLBACK_PITCH)
             engine.setSpeechRate(DEFAULT_FALLBACK_RATE)
             engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
@@ -207,7 +212,7 @@ class VoiceEngine(
             val player = MediaPlayer().apply {
                 setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -246,9 +251,11 @@ class VoiceEngine(
         rate: Float,
         onComplete: (() -> Unit)?
     ) {
+        val maxLen = (TextToSpeech.getMaxSpeechInputLength() - 100).coerceAtLeast(1000)
+        val safeText = if (text.length > maxLen) text.take(maxLen) else text
         val naturalRate = rate.takeIf { it > 0f } ?: DEFAULT_FALLBACK_RATE
         if (!isTtsReady) {
-            queuedFallbackText = text
+            queuedFallbackText = safeText
             queuedFallbackRate = naturalRate
             queuedOnDone = onComplete
             return
@@ -263,7 +270,7 @@ class VoiceEngine(
         engine.setPitch(DEFAULT_FALLBACK_PITCH)
         engine.setSpeechRate(naturalRate.coerceIn(0.6f, 1.8f))
         val res = engine.speak(
-            text,
+            safeText,
             TextToSpeech.QUEUE_FLUSH,
             null,
             "xestlab_voice_${System.currentTimeMillis()}"

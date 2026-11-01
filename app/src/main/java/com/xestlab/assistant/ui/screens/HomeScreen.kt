@@ -71,6 +71,7 @@ import com.xestlab.assistant.ai.PlannerProposal
 import com.xestlab.assistant.data.model.ConversationTurn
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.UnreadEmailEntity
+import com.xestlab.assistant.service.WakeWordService
 import com.xestlab.assistant.ui.theme.BgDark
 import com.xestlab.assistant.ui.theme.BorderDark
 import com.xestlab.assistant.ui.theme.CardShape8
@@ -148,6 +149,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
             override fun onError(error: Int) {
                 isListening = false
                 partialSpeech = ""
+                WakeWordService.resumeTemporarily(context)
                 voiceFeedbackError = when (error) {
                     SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that. Tap the microphone to try again."
                     SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech detected."
@@ -161,6 +163,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
             override fun onResults(results: Bundle?) {
                 isListening = false
                 partialSpeech = ""
+                WakeWordService.resumeTemporarily(context)
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 val topUtterance = matches?.firstOrNull()?.trim().orEmpty()
                 if (topUtterance.isNotEmpty()) {
@@ -185,6 +188,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 speechRecognizer?.destroy()
             } catch (_: Exception) {
             }
+            WakeWordService.resumeTemporarily(context)
         }
     }
 
@@ -194,6 +198,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
             voiceFeedbackError = "SpeechRecognizer service is not available on this device."
             return
         }
+        WakeWordService.pauseTemporarily(context)
         viewModel.stopSpeaking()
         partialSpeech = ""
         voiceFeedbackError = null
@@ -208,6 +213,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
             isListening = true
         } catch (e: Exception) {
             isListening = false
+            WakeWordService.resumeTemporarily(context)
             voiceFeedbackError = "Unable to start SpeechRecognizer: ${e.message}"
         }
     }
@@ -300,6 +306,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                             } catch (_: Exception) {
                             }
                             isListening = false
+                            WakeWordService.resumeTemporarily(context)
                         } else {
                             val hasPerm = ContextCompat.checkSelfPermission(
                                 context,

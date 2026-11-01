@@ -27,6 +27,7 @@ import com.xestlab.assistant.data.repository.WeeklySummaryData
 import com.xestlab.assistant.service.AlarmScheduler
 import com.xestlab.assistant.service.EmailHelper
 import com.xestlab.assistant.service.VoiceEngine
+import com.xestlab.assistant.service.WakeWordService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -36,6 +37,8 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -83,11 +86,43 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val _noteSearchQuery = MutableStateFlow("")
     val noteSearchQuery: StateFlow<String> = _noteSearchQuery.asStateFlow()
 
-    private val _activeProvider = MutableStateFlow(securePrefs.llmProvider)
+    private val _activeProvider = MutableStateFlow(LlmProvider.GROQ)
     val activeProvider: StateFlow<LlmProvider> = _activeProvider.asStateFlow()
 
     private val _aiEnabledState = MutableStateFlow(securePrefs.isAiEnabled)
     val aiEnabledState: StateFlow<Boolean> = _aiEnabledState.asStateFlow()
+
+    private val _savedGeminiSummary = MutableStateFlow(securePrefs.maskedKeyPreview(LlmProvider.GEMINI))
+    val savedGeminiSummary: StateFlow<String> = _savedGeminiSummary.asStateFlow()
+
+    private val _savedGroqSummary = MutableStateFlow(securePrefs.maskedKeyPreview(LlmProvider.GROQ))
+    val savedGroqSummary: StateFlow<String> = _savedGroqSummary.asStateFlow()
+
+    private val _llmTestDiagnosticText = MutableStateFlow(
+        "Primary Engine: GROQ (${AiClient.GROQ_MODEL}) | Groq vault: ${securePrefs.maskedKeyPreview(LlmProvider.GROQ)}"
+    )
+    val llmTestDiagnosticText: StateFlow<String> = _llmTestDiagnosticText.asStateFlow()
+
+    private val _llmTestIsError = MutableStateFlow(false)
+    val llmTestIsError: StateFlow<Boolean> = _llmTestIsError.asStateFlow()
+
+    // Wake Word & Picovoice Porcupine Reactive State
+    private val _wakeWordEnabledState = MutableStateFlow(securePrefs.isWakeWordEnabled)
+    val wakeWordEnabledState: StateFlow<Boolean> = _wakeWordEnabledState.asStateFlow()
+
+    private val _wakeWordNameState = MutableStateFlow(securePrefs.wakeWordName)
+    val wakeWordNameState: StateFlow<String> = _wakeWordNameState.asStateFlow()
+
+    private val _savedPicovoiceSummary = MutableStateFlow(securePrefs.maskedPicovoiceKeyPreview())
+    val savedPicovoiceSummary: StateFlow<String> = _savedPicovoiceSummary.asStateFlow()
+
+    private val _hasImportedPpn = MutableStateFlow(
+        File(appContext.filesDir, WakeWordService.IMPORTED_PPN_FILENAME).exists()
+    )
+    val hasImportedPpn: StateFlow<Boolean> = _hasImportedPpn.asStateFlow()
+
+    val wakeWordStatusText: StateFlow<String> = WakeWordService.statusMessageFlow
+    val wakeWordStatusIsError: StateFlow<Boolean> = WakeWordService.statusIsErrorFlow
 
     private val _weeklySummary = MutableStateFlow(
         WeeklySummaryData(
@@ -140,6 +175,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
+        securePrefs.llmProvider = LlmProvider.GROQ
+        _activeProvider.value = LlmProvider.GROQ
         viewModelScope.launch {
             AppDatabase.ensureSeeded(db)
             refreshDailyPlanText()
@@ -402,9 +439,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         userMessage: String,
         prefs: UserPreferencesState
     ) {
-        if (securePrefs.isAiEnabled) {
-            if (!securePrefs.hasActiveLlmKey()) {
-                respond(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE, speak = true)
+        if (securePrefs.isAiEnabled || securePrefs.hasGroqKey()) {
+            val storedGroqKey = securePrefs.getKeyForProvider(LlmProvider.GROQ)
+            if (storedGroqKey.isNullOrBlank()) {
+                val missingMsg = "No GROQ API key found in EncryptedSharedPreferences. Open Settings and save your Groq key first."
+                _llmTestIsError.value = true
+                _llmTestDiagnosticText.value = missingMsg
+                repository.recordTurn("ASSISTANT", "${AiClient.AI_BRAIN_UNREACHABLE_MESSAGE}\n[$missingMsg]")
+                speakText(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE)
                 return
             }
             _isThinking.value = true
@@ -418,17 +460,28 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
             result.fold(
                 onSuccess = { aiResp ->
+                    _llmTestIsError.value = false
+                    _llmTestDiagnosticText.value =
+                        "HTTP 200 OK [${aiResp.providerUsed.name}/${aiResp.modelUsed}]: ${aiResp.replyText}"
+                    // Speak Groq's response out loud via TextToSpeech
                     respond(aiResp.replyText, speak = true)
                 },
-                onFailure = {
-                    respond(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE, speak = true)
+                onFailure = { err ->
+                    val exactDiag = AiClient.formatThrowableDiagnostic(err)
+                    _llmTestIsError.value = true
+                    _llmTestDiagnosticText.value = exactDiag
+                    repository.recordTurn(
+                        "ASSISTANT",
+                        "${AiClient.AI_BRAIN_UNREACHABLE_MESSAGE}\n[Diagnostic: $exactDiag]"
+                    )
+                    speakText(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE)
                 }
             )
         } else {
             val offlinePlan = repository.buildSpokenDailyPlan()
             _dailyPlanSummary.value = offlinePlan
             respond(
-                "$offlinePlan (Enable Gemini or Groq in Settings for full business coach conversation, or prefix with 'Note:' to save a note.)",
+                "$offlinePlan (Enable Groq AI routing in Settings for full business coach conversation, or prefix with 'Note:' to save a note.)",
                 speak = true
             )
         }
@@ -685,61 +738,101 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _activeProvider.value = provider
     }
 
+    fun refreshSavedKeySummaries() {
+        _savedGeminiSummary.value = securePrefs.maskedKeyPreview(LlmProvider.GEMINI)
+        _savedGroqSummary.value = securePrefs.maskedKeyPreview(LlmProvider.GROQ)
+        _wakeWordEnabledState.value = securePrefs.isWakeWordEnabled
+        _wakeWordNameState.value = securePrefs.wakeWordName
+        _savedPicovoiceSummary.value = securePrefs.maskedPicovoiceKeyPreview()
+        _hasImportedPpn.value =
+            File(appContext.filesDir, WakeWordService.IMPORTED_PPN_FILENAME).exists()
+    }
+
+    fun setDiagnosticError(message: String) {
+        _llmTestIsError.value = true
+        _llmTestDiagnosticText.value = message
+    }
+
     fun saveLlmSettings(
         aiEnabled: Boolean,
-        provider: LlmProvider,
-        geminiKeyInput: String,
-        geminiModel: String,
-        groqKeyInput: String,
-        groqModel: String
+        provider: LlmProvider = LlmProvider.GROQ,
+        geminiKeyInput: String = "",
+        groqKeyInput: String
     ) {
-        if (geminiKeyInput.isNotBlank()) {
-            securePrefs.geminiApiKey = geminiKeyInput.trim()
-        }
+        /*
+         * Gemini key saving temporarily disabled while Groq is primary:
+         * if (geminiKeyInput.isNotBlank()) {
+         *     securePrefs.geminiApiKey = geminiKeyInput
+         * }
+         */
         if (groqKeyInput.isNotBlank()) {
-            securePrefs.groqApiKey = groqKeyInput.trim()
+            securePrefs.groqApiKey = groqKeyInput
         }
-        securePrefs.geminiModel = geminiModel.trim().ifBlank { "gemini-2.5-flash" }
-        securePrefs.groqModel = groqModel.trim().ifBlank { "llama3-70b-8192" }
-        securePrefs.llmProvider = provider
-        _activeProvider.value = provider
+        securePrefs.llmProvider = LlmProvider.GROQ
+        _activeProvider.value = LlmProvider.GROQ
 
-        val autoEnable = aiEnabled || geminiKeyInput.isNotBlank() || groqKeyInput.isNotBlank()
+        val hasGroqKey = securePrefs.hasGroqKey()
+        val autoEnable = if (groqKeyInput.isNotBlank()) true else aiEnabled
         securePrefs.isAiEnabled = autoEnable
         _aiEnabledState.value = autoEnable
+        refreshSavedKeySummaries()
 
-        _statusBanner.value = "Encrypted & saved ${provider.name} AI settings."
+        val activeVaultPreview = securePrefs.maskedKeyPreview(LlmProvider.GROQ)
+        _llmTestIsError.value = !hasGroqKey
+        _llmTestDiagnosticText.value = if (hasGroqKey) {
+            "Saved GROQ key in EncryptedSharedPreferences ($activeVaultPreview). Tap 'Test GROQ' to verify ${AiClient.GROQ_MODEL}."
+        } else {
+            "Settings saved, but no GROQ API key is stored yet."
+        }
+    }
+
+    /**
+     * Resolves the Groq API key from the input field if typed; if empty, fetches the saved key
+     * directly from EncryptedSharedPreferences (SecurePreferences).
+     */
+    fun resolveApiKeyForTest(
+        provider: LlmProvider = LlmProvider.GROQ,
+        geminiKeyDraft: String = "",
+        groqKeyDraft: String
+    ): String? {
+        val draftClean = SecurePreferences.sanitizeApiKey(groqKeyDraft)
+        if (draftClean.isNotEmpty()) {
+            securePrefs.groqApiKey = draftClean
+            refreshSavedKeySummaries()
+            return draftClean
+        }
+        return securePrefs.getKeyForProvider(LlmProvider.GROQ)
     }
 
     fun testActiveLlmConnection(
-        provider: LlmProvider,
-        geminiKeyDraft: String,
-        geminiModelDraft: String,
-        groqKeyDraft: String,
-        groqModelDraft: String
+        provider: LlmProvider = LlmProvider.GROQ,
+        resolvedKey: String
     ) {
         viewModelScope.launch {
             _isThinking.value = true
-            val result = when (provider) {
-                LlmProvider.GEMINI -> {
-                    val key = geminiKeyDraft.trim().ifBlank { securePrefs.geminiApiKey }
-                    AiClient.testGeminiConnection(key, geminiModelDraft)
-                }
-                LlmProvider.GROQ -> {
-                    val key = groqKeyDraft.trim().ifBlank { securePrefs.groqApiKey }
-                    AiClient.testGroqConnection(key, groqModelDraft)
-                }
-            }
+            _llmTestIsError.value = false
+            _llmTestDiagnosticText.value =
+                "Testing GROQ (${AiClient.GROQ_MODEL}) over HTTPS (key length=${resolvedKey.length} chars)..."
+
+            // Gemini disabled for now; always test primary Groq engine ("openai/gpt-oss-120b")
+            val result = AiClient.testGroqConnection(resolvedKey)
             _isThinking.value = false
 
             result.fold(
-                onSuccess = { reply ->
-                    _statusBanner.value = "${provider.name} connected: $reply"
-                    speakText(reply)
+                onSuccess = { diag ->
+                    securePrefs.llmProvider = LlmProvider.GROQ
+                    securePrefs.isAiEnabled = true
+                    _activeProvider.value = LlmProvider.GROQ
+                    _aiEnabledState.value = true
+                    _llmTestIsError.value = false
+                    _llmTestDiagnosticText.value =
+                        "HTTP ${diag.statusCode} OK [${diag.provider.name}/${diag.modelUsed}]: ${diag.replyText}"
+                    speakText(diag.replyText)
                 },
-                onFailure = {
-                    _statusBanner.value = "${provider.name} failed. Check internet or API key."
-                    speakText(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE)
+                onFailure = { err ->
+                    val exactError = AiClient.formatThrowableDiagnostic(err)
+                    _llmTestIsError.value = true
+                    _llmTestDiagnosticText.value = exactError
                 }
             )
         }
@@ -834,5 +927,100 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 "Import failed: invalid JSON format."
             }
         }
+    }
+
+    // --- Custom Wake Word (Picovoice Porcupine) Controls ---
+
+    fun saveWakeWordSettings(
+        enabled: Boolean,
+        wakeWordNameInput: String,
+        picovoiceKeyInput: String
+    ) {
+        securePrefs.wakeWordName = wakeWordNameInput.trim()
+        if (picovoiceKeyInput.isNotBlank()) {
+            securePrefs.picovoiceAccessKey = picovoiceKeyInput
+        }
+        securePrefs.isWakeWordEnabled = enabled
+        refreshSavedKeySummaries()
+
+        if (enabled) {
+            WakeWordService.start(appContext)
+            val label = securePrefs.wakeWordName.ifBlank { "Assistant" }
+            _statusBanner.value = "Saved wake word \"$label\" & started Foreground WakeWordService."
+        } else {
+            WakeWordService.stop(appContext)
+            _statusBanner.value = "Saved wake word settings (background listener disabled)."
+        }
+    }
+
+    fun setWakeWordEnabled(
+        enabled: Boolean,
+        wakeWordNameDraft: String,
+        picovoiceKeyDraft: String
+    ) {
+        if (wakeWordNameDraft.isNotBlank()) {
+            securePrefs.wakeWordName = wakeWordNameDraft.trim()
+        }
+        if (picovoiceKeyDraft.isNotBlank()) {
+            securePrefs.picovoiceAccessKey = picovoiceKeyDraft
+        }
+        securePrefs.isWakeWordEnabled = enabled
+        refreshSavedKeySummaries()
+
+        if (enabled) {
+            WakeWordService.start(appContext)
+        } else {
+            WakeWordService.stop(appContext)
+        }
+    }
+
+    fun importCustomWakeWordPpn(bytes: ByteArray) {
+        if (bytes.isEmpty()) return
+        try {
+            val outFile = File(appContext.filesDir, WakeWordService.IMPORTED_PPN_FILENAME)
+            FileOutputStream(outFile).use { it.write(bytes) }
+            _hasImportedPpn.value = true
+            if (securePrefs.isWakeWordEnabled) {
+                WakeWordService.start(appContext)
+            } else {
+                WakeWordService.updateExternalStatus(
+                    "Imported custom .ppn (${bytes.size} bytes). Toggle ON or tap Save Wake Word to start.",
+                    false
+                )
+            }
+            _statusBanner.value = "Imported custom .ppn wake word model (${bytes.size} bytes)."
+        } catch (e: Exception) {
+            WakeWordService.updateExternalStatus("Failed to save .ppn file: ${e.message}", true)
+        }
+    }
+
+    fun clearImportedWakeWordPpn() {
+        val outFile = File(appContext.filesDir, WakeWordService.IMPORTED_PPN_FILENAME)
+        if (outFile.exists()) {
+            outFile.delete()
+        }
+        _hasImportedPpn.value = false
+        if (securePrefs.isWakeWordEnabled) {
+            WakeWordService.start(appContext)
+        } else {
+            WakeWordService.updateExternalStatus(
+                "Reverted to bundled assets/${WakeWordService.ASSET_WAKE_WORD_PATH}.",
+                false
+            )
+        }
+    }
+
+    fun testJarvisLoopFromSettings(
+        wakeWordNameDraft: String,
+        picovoiceKeyDraft: String
+    ) {
+        if (wakeWordNameDraft.isNotBlank()) {
+            securePrefs.wakeWordName = wakeWordNameDraft.trim()
+        }
+        if (picovoiceKeyDraft.isNotBlank()) {
+            securePrefs.picovoiceAccessKey = picovoiceKeyDraft
+        }
+        refreshSavedKeySummaries()
+        WakeWordService.triggerJarvisLoopTest(appContext)
     }
 }
