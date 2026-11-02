@@ -26,8 +26,9 @@ data class UserPreferencesState(
     val quietHoursStart: String = "22:00",
     val quietHoursEnd: String = "07:00",
     val quietHoursEnabled: Boolean = true,
-    val voiceSpeed: Float = 0.9f,
-    val autoReadPlanOnLaunch: Boolean = true
+    val voiceSpeed: Float = 1.0f,
+    val autoReadPlanOnLaunch: Boolean = true,
+    val selectedVoiceName: String = ""
 )
 
 class UserPreferencesDataStore(private val context: Context) {
@@ -39,8 +40,9 @@ class UserPreferencesDataStore(private val context: Context) {
         val KEY_QUIET_START = stringPreferencesKey("quiet_hours_start")
         val KEY_QUIET_END = stringPreferencesKey("quiet_hours_end")
         val KEY_QUIET_ENABLED = booleanPreferencesKey("quiet_hours_enabled")
-        val KEY_VOICE_SPEED = floatPreferencesKey("voice_speed")
+        val KEY_VOICE_SPEED = floatPreferencesKey("voice_speed_v2")
         val KEY_AUTO_READ_PLAN = booleanPreferencesKey("auto_read_plan_on_launch")
+        val KEY_SELECTED_VOICE_NAME = stringPreferencesKey("selected_android_voice_name")
     }
 
     val preferencesFlow: Flow<UserPreferencesState> = context.userDataStore.data
@@ -59,8 +61,9 @@ class UserPreferencesDataStore(private val context: Context) {
                 quietHoursStart = prefs[KEY_QUIET_START] ?: "22:00",
                 quietHoursEnd = prefs[KEY_QUIET_END] ?: "07:00",
                 quietHoursEnabled = prefs[KEY_QUIET_ENABLED] ?: true,
-                voiceSpeed = prefs[KEY_VOICE_SPEED] ?: 0.9f,
-                autoReadPlanOnLaunch = prefs[KEY_AUTO_READ_PLAN] ?: true
+                voiceSpeed = prefs[KEY_VOICE_SPEED] ?: 1.0f,
+                autoReadPlanOnLaunch = prefs[KEY_AUTO_READ_PLAN] ?: true,
+                selectedVoiceName = prefs[KEY_SELECTED_VOICE_NAME] ?: ""
             )
         }
 
@@ -119,6 +122,12 @@ class UserPreferencesDataStore(private val context: Context) {
     suspend fun saveVoiceSpeed(speed: Float) {
         context.userDataStore.edit { prefs ->
             prefs[KEY_VOICE_SPEED] = speed.coerceIn(0.6f, 1.8f)
+        }
+    }
+
+    suspend fun saveSelectedVoiceName(voiceName: String) {
+        context.userDataStore.edit { prefs ->
+            prefs[KEY_SELECTED_VOICE_NAME] = voiceName.trim()
         }
     }
 }

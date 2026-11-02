@@ -45,9 +45,7 @@ class XestlabApplication : Application() {
             if (securePrefs.isImapEnabled && securePrefs.imapUser.isNotBlank() && securePrefs.imapPassword.isNotBlank()) {
                 EmailHelper.schedulePeriodicChecks(this@XestlabApplication, securePrefs.isImapWifiOnly)
             }
-            if (securePrefs.isWakeWordEnabled) {
-                WakeWordService.start(this@XestlabApplication)
-            }
+            WakeWordService.syncPersistedDiagnostics(this@XestlabApplication)
         }
     }
 

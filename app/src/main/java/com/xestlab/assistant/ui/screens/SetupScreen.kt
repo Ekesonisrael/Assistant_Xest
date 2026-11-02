@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.xestlab.assistant.ui.screens
 
 import android.Manifest
@@ -19,7 +21,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -36,9 +42,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -48,11 +56,14 @@ import com.xestlab.assistant.ui.theme.BgDark
 import com.xestlab.assistant.ui.theme.BorderDark
 import com.xestlab.assistant.ui.theme.CardShape8
 import com.xestlab.assistant.ui.theme.SurfaceDark
+import com.xestlab.assistant.ui.theme.SurfaceSubtleDark
 import com.xestlab.assistant.ui.theme.TealAccent
 import com.xestlab.assistant.ui.theme.TextMutedDark
 import com.xestlab.assistant.ui.theme.TextPrimaryDark
 import com.xestlab.assistant.ui.theme.WarningRed
 import com.xestlab.assistant.ui.viewmodel.AssistantViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun SetupScreen(
@@ -117,10 +128,16 @@ fun SetupScreen(
         }
     }
 
+    val scope = rememberCoroutineScope()
+    val nameBringIntoView = remember { BringIntoViewRequester() }
+    val wakeBringIntoView = remember { BringIntoViewRequester() }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(BgDark)
+            .systemBarsPadding()
+            .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -161,16 +178,29 @@ fun SetupScreen(
                         nameInput = it
                         if (validationError != null) validationError = null
                     },
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = TextPrimaryDark),
                     label = { Text("Your Name") },
-                    placeholder = { Text("King Israel") },
+                    placeholder = { Text("King Israel", color = TextMutedDark) },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .bringIntoViewRequester(nameBringIntoView)
+                        .onFocusEvent { focusState ->
+                            if (focusState.isFocused) {
+                                scope.launch {
+                                    delay(120L)
+                                    nameBringIntoView.bringIntoView()
+                                }
+                            }
+                        },
                     shape = CardShape8,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = TealAccent,
                         unfocusedBorderColor = BorderDark,
                         focusedTextColor = TextPrimaryDark,
                         unfocusedTextColor = TextPrimaryDark,
+                        focusedContainerColor = SurfaceSubtleDark,
+                        unfocusedContainerColor = SurfaceSubtleDark,
                         cursorColor = TealAccent,
                         focusedLabelColor = TealAccent,
                         unfocusedLabelColor = TextMutedDark
@@ -180,16 +210,29 @@ fun SetupScreen(
                 OutlinedTextField(
                     value = wakeUpInput,
                     onValueChange = { wakeUpInput = it },
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = TextPrimaryDark),
                     label = { Text("Morning Wake-Up Alarm (HH:mm)") },
-                    placeholder = { Text("07:30") },
+                    placeholder = { Text("07:30", color = TextMutedDark) },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .bringIntoViewRequester(wakeBringIntoView)
+                        .onFocusEvent { focusState ->
+                            if (focusState.isFocused) {
+                                scope.launch {
+                                    delay(120L)
+                                    wakeBringIntoView.bringIntoView()
+                                }
+                            }
+                        },
                     shape = CardShape8,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = TealAccent,
                         unfocusedBorderColor = BorderDark,
                         focusedTextColor = TextPrimaryDark,
                         unfocusedTextColor = TextPrimaryDark,
+                        focusedContainerColor = SurfaceSubtleDark,
+                        unfocusedContainerColor = SurfaceSubtleDark,
                         cursorColor = TealAccent,
                         focusedLabelColor = TealAccent,
                         unfocusedLabelColor = TextMutedDark

@@ -72,14 +72,18 @@ fun MemoryDialog(
                     OutlinedTextField(
                         value = newFactText,
                         onValueChange = { newFactText = it },
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = TextPrimaryDark),
                         placeholder = { Text("Add fact...", color = TextMutedDark) },
                         singleLine = true,
                         shape = CardShape8,
                         colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = SurfaceSubtleDark,
+                            unfocusedContainerColor = SurfaceSubtleDark,
                             focusedBorderColor = TealAccent,
                             unfocusedBorderColor = BorderDark,
                             focusedTextColor = TextPrimaryDark,
-                            unfocusedTextColor = TextPrimaryDark
+                            unfocusedTextColor = TextPrimaryDark,
+                            cursorColor = TealAccent
                         ),
                         modifier = Modifier.weight(1f)
                     )

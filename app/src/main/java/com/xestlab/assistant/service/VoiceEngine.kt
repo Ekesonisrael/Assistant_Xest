@@ -7,6 +7,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.util.Log
 import com.xestlab.assistant.ai.AiClient
 import com.xestlab.assistant.ai.ElevenLabsApiException
@@ -27,22 +28,25 @@ import java.io.File
 import java.io.FileInputStream
 import java.util.Locale
 
+data class InstalledTtsVoiceInfo(
+    val name: String,
+    val displayLabel: String,
+    val localeDisplay: String,
+    val quality: Int,
+    val qualityLabel: String,
+    val matchesDeviceLanguage: Boolean,
+    val networkRequired: Boolean
+)
+
 /**
- * Unified Voice Engine routing all spoken output in Xestlab Assistant
- * (daily briefings, AI chat replies, task completions, checklist congratulations,
- * 7:30 AM wake-up alarms, and Jarvis wake-word responses):
+ * Unified Voice Engine routing all spoken output in Xestlab Assistant:
  *
- * 1. Checks if the ElevenLabs API key is saved in EncryptedSharedPreferences AND
- *    whether an internet connection is available.
- * 2. IF key exists and internet is available:
- *    - Sends OkHttp POST to https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM
- *    - Saves the returned MP3 stream to a temporary file in appContext.cacheDir
- *    - Plays it via Android's MediaPlayer (using an open FileDescriptor) and releases
- *      all MediaPlayer + cache file resources upon completion/error/stop.
- * 3. IF key is missing, offline, ElevenLabs returns an error (401, quota limit, etc.),
- *    or MediaPlayer fails:
- *    - Immediately catches & logs the exact error via Log.e and falls back to Android
- *      TextToSpeech (0.9f speech rate, 1.0f pitch) so the app never goes silent.
+ * - Default ElevenLabs Voice ID: EXAVITQu4vr4xnSDxMaL
+ * - Caches synthesized MP3 audio by SHA-256 text hash.
+ * - Uses cloud voice ONLY for the wake-up briefing (`isWakeUpBriefing = true`) and replies under 200 characters.
+ * - Counts characters used this month and warns at 80% of 10,000 (8,000 chars).
+ * - On HTTP 401 or 402, records ONE clear message in Settings and pauses cloud voice for 24 hours without retrying.
+ * - Android TTS fallback: speech rate 1.0, installed voice picker sorted by quality, and short sentences with small pauses.
  */
 class VoiceEngine(
     context: Context,
@@ -54,20 +58,107 @@ class VoiceEngine(
         private const val TAG = "VoiceEngine"
 
         const val ELEVENLABS_VOICE_URL = ElevenLabsClient.TTS_ENDPOINT
-        const val DEFAULT_FALLBACK_RATE = 0.9f
+        const val DEFAULT_FALLBACK_RATE = 1.0f
         const val DEFAULT_FALLBACK_PITCH = 1.0f
+        const val MAX_CLOUD_REPLY_CHARS = 200
+        private const val SENTENCE_PAUSE_MS = 180L
+        private const val MAX_SENTENCE_CHARS = 110
 
         private val _statusMessageFlow = MutableStateFlow(
-            "Voice Engine ready. Save your ElevenLabs API key to enable neural voice (21m00Tcm4TlvDq8ikWAM)."
+            "Voice Engine ready (Default Voice ID: ${ElevenLabsClient.VOICE_ID} | Fallback: Android TTS 1.0x)."
         )
         val statusMessageFlow: StateFlow<String> = _statusMessageFlow.asStateFlow()
 
         private val _statusIsErrorFlow = MutableStateFlow(false)
         val statusIsErrorFlow: StateFlow<Boolean> = _statusIsErrorFlow.asStateFlow()
 
+        private val _installedVoicesFlow = MutableStateFlow<List<InstalledTtsVoiceInfo>>(emptyList())
+        val installedVoicesFlow: StateFlow<List<InstalledTtsVoiceInfo>> = _installedVoicesFlow.asStateFlow()
+
+        private val _monthlyCharsUsedFlow = MutableStateFlow(0)
+        val monthlyCharsUsedFlow: StateFlow<Int> = _monthlyCharsUsedFlow.asStateFlow()
+
+        private val _cloudPausedUntilFlow = MutableStateFlow(0L)
+        val cloudPausedUntilFlow: StateFlow<Long> = _cloudPausedUntilFlow.asStateFlow()
+
+        private val _cloudPauseMessageFlow = MutableStateFlow("")
+        val cloudPauseMessageFlow: StateFlow<String> = _cloudPauseMessageFlow.asStateFlow()
+
         fun updateExternalDiagnostic(message: String, isError: Boolean) {
             _statusMessageFlow.value = message
             _statusIsErrorFlow.value = isError
+        }
+
+        fun syncPersistedCloudState(securePrefs: SecurePreferences) {
+            val isPaused = securePrefs.isElevenLabsCurrentlyPaused()
+            _cloudPausedUntilFlow.value = if (isPaused) securePrefs.elevenLabsPausedUntilMillis else 0L
+            _cloudPauseMessageFlow.value = if (isPaused) securePrefs.elevenLabsPauseMessage else ""
+            _monthlyCharsUsedFlow.value = securePrefs.elevenLabsCharsUsedThisMonth
+        }
+
+        fun splitIntoShortSentences(rawText: String): List<String> {
+            val normalized = rawText.replace(Regex("\\s+"), " ").trim()
+            if (normalized.isEmpty()) return emptyList()
+
+            val primaryChunks = normalized.split(Regex("(?<=[.!?])\\s+"))
+            val result = ArrayList<String>(primaryChunks.size + 4)
+
+            for (chunk in primaryChunks) {
+                val trimmed = chunk.trim()
+                if (trimmed.isEmpty()) continue
+                if (trimmed.length <= MAX_SENTENCE_CHARS) {
+                    result.add(trimmed)
+                } else {
+                    val clauses = trimmed.split(Regex("(?<=[,;:])\\s+"))
+                    var buffer = StringBuilder()
+                    for (clause in clauses) {
+                        val cleanClause = clause.trim()
+                        if (cleanClause.isEmpty()) continue
+                        if (buffer.isEmpty()) {
+                            if (cleanClause.length <= MAX_SENTENCE_CHARS) {
+                                buffer.append(cleanClause)
+                            } else {
+                                result.addAll(splitLongClauseByWords(cleanClause))
+                            }
+                        } else if (buffer.length + 1 + cleanClause.length <= MAX_SENTENCE_CHARS) {
+                            buffer.append(' ').append(cleanClause)
+                        } else {
+                            result.add(buffer.toString())
+                            buffer = StringBuilder()
+                            if (cleanClause.length <= MAX_SENTENCE_CHARS) {
+                                buffer.append(cleanClause)
+                            } else {
+                                result.addAll(splitLongClauseByWords(cleanClause))
+                            }
+                        }
+                    }
+                    if (buffer.isNotEmpty()) {
+                        result.add(buffer.toString())
+                    }
+                }
+            }
+            return if (result.isEmpty()) listOf(normalized) else result
+        }
+
+        private fun splitLongClauseByWords(clause: String): List<String> {
+            val words = clause.split(' ')
+            val parts = ArrayList<String>()
+            var current = StringBuilder()
+            for (word in words) {
+                if (word.isEmpty()) continue
+                if (current.isEmpty()) {
+                    current.append(word)
+                } else if (current.length + 1 + word.length <= MAX_SENTENCE_CHARS) {
+                    current.append(' ').append(word)
+                } else {
+                    parts.add(current.toString())
+                    current = StringBuilder(word)
+                }
+            }
+            if (current.isNotEmpty()) {
+                parts.add(current.toString())
+            }
+            return parts
         }
     }
 
@@ -86,9 +177,15 @@ class VoiceEngine(
     private var queuedFallbackRate: Float = DEFAULT_FALLBACK_RATE
     private var queuedOnDone: (() -> Unit)? = null
 
+    @Volatile
+    private var activeFinalUtteranceId: String? = null
     private var activeOnDoneCallback: (() -> Unit)? = null
     private var mediaPlayer: MediaPlayer? = null
-    private var activeTempMp3File: File? = null
+    private var activeMp3File: File? = null
+
+    init {
+        syncPersistedCloudState(securePrefs)
+    }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
@@ -106,12 +203,21 @@ class VoiceEngine(
             engine.setAudioAttributes(speechAttrs)
             engine.setPitch(DEFAULT_FALLBACK_PITCH)
             engine.setSpeechRate(DEFAULT_FALLBACK_RATE)
+
+            refreshInstalledVoicesAndApplySelection(engine)
+
             engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     onSpeakingStateChanged(true)
                 }
 
                 override fun onDone(utteranceId: String?) {
+                    val expectedFinal = activeFinalUtteranceId
+                    if (expectedFinal != null && utteranceId != expectedFinal) {
+                        // Intermediate sentence or pause finished; wait for final sentence
+                        return
+                    }
+                    activeFinalUtteranceId = null
                     onSpeakingStateChanged(false)
                     val cb = activeOnDoneCallback
                     activeOnDoneCallback = null
@@ -121,6 +227,7 @@ class VoiceEngine(
                 @Deprecated("Deprecated in Java")
                 override fun onError(utteranceId: String?) {
                     Log.e(TAG, "Android TextToSpeech utterance error (utteranceId=$utteranceId)")
+                    activeFinalUtteranceId = null
                     onSpeakingStateChanged(false)
                     val cb = activeOnDoneCallback
                     activeOnDoneCallback = null
@@ -132,6 +239,7 @@ class VoiceEngine(
                         TAG,
                         "Android TextToSpeech utterance error (utteranceId=$utteranceId, code=$errorCode)"
                     )
+                    activeFinalUtteranceId = null
                     onSpeakingStateChanged(false)
                     val cb = activeOnDoneCallback
                     activeOnDoneCallback = null
@@ -139,6 +247,11 @@ class VoiceEngine(
                 }
 
                 override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                    val expectedFinal = activeFinalUtteranceId
+                    if (!interrupted && expectedFinal != null && utteranceId != expectedFinal) {
+                        return
+                    }
+                    activeFinalUtteranceId = null
                     onSpeakingStateChanged(false)
                     val cb = activeOnDoneCallback
                     activeOnDoneCallback = null
@@ -161,16 +274,101 @@ class VoiceEngine(
         }
     }
 
+    fun refreshInstalledVoices(): List<InstalledTtsVoiceInfo> {
+        val engine = tts ?: return _installedVoicesFlow.value
+        if (!isTtsReady) return _installedVoicesFlow.value
+        return refreshInstalledVoicesAndApplySelection(engine)
+    }
+
+    private fun refreshInstalledVoicesAndApplySelection(engine: TextToSpeech): List<InstalledTtsVoiceInfo> {
+        return try {
+            val deviceLang = Locale.getDefault().language.lowercase(Locale.US)
+            val rawVoices = engine.voices?.toList().orEmpty()
+            val installed = rawVoices.filter { voice ->
+                val features = voice.features
+                features == null || !features.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED)
+            }
+
+            val mapped = installed.map { voice ->
+                val qLabel = qualityToLabel(voice.quality)
+                val locDisplay = voice.locale?.displayName?.ifBlank { voice.locale.toLanguageTag() }
+                    ?: "System"
+                val netTag = if (voice.isNetworkConnectionRequired) "Network" else "On-device"
+                InstalledTtsVoiceInfo(
+                    name = voice.name,
+                    displayLabel = "$locDisplay — $qLabel ($netTag) [${voice.name}]",
+                    localeDisplay = locDisplay,
+                    quality = voice.quality,
+                    qualityLabel = qLabel,
+                    matchesDeviceLanguage = voice.locale?.language?.lowercase(Locale.US) == deviceLang,
+                    networkRequired = voice.isNetworkConnectionRequired
+                )
+            }.sortedWith(
+                compareByDescending<InstalledTtsVoiceInfo> { it.quality }
+                    .thenByDescending { it.matchesDeviceLanguage }
+                    .thenBy { it.networkRequired }
+                    .thenBy { it.localeDisplay }
+                    .thenBy { it.name }
+            )
+
+            _installedVoicesFlow.value = mapped
+
+            val savedVoiceName = securePrefs.androidTtsVoiceName
+            val chosenVoice: Voice? = if (savedVoiceName.isNotBlank()) {
+                installed.firstOrNull { it.name == savedVoiceName }
+            } else {
+                val topDeviceLang = mapped.firstOrNull { it.matchesDeviceLanguage }
+                topDeviceLang?.let { best -> installed.firstOrNull { it.name == best.name } }
+            }
+            if (chosenVoice != null) {
+                engine.voice = chosenVoice
+            }
+            mapped
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to enumerate Android TTS voices: ${e.message}")
+            emptyList()
+        }
+    }
+
+    fun selectAndroidVoice(voiceName: String) {
+        securePrefs.androidTtsVoiceName = voiceName
+        val engine = tts ?: return
+        if (!isTtsReady) return
+        try {
+            val available = engine.voices?.toList().orEmpty()
+            val target = available.firstOrNull { it.name == voiceName }
+            if (target != null) {
+                engine.voice = target
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed applying selected Android TTS voice '$voiceName': ${e.message}")
+        }
+    }
+
+    private fun qualityToLabel(quality: Int): String {
+        return when {
+            quality >= Voice.QUALITY_VERY_HIGH -> "Very High (${quality})"
+            quality >= Voice.QUALITY_HIGH -> "High (${quality})"
+            quality >= Voice.QUALITY_NORMAL -> "Normal (${quality})"
+            quality >= Voice.QUALITY_LOW -> "Low (${quality})"
+            else -> "Very Low (${quality})"
+        }
+    }
+
     /**
      * Speaks [text] aloud:
-     * - Routes to ElevenLabs (https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM)
-     *   whenever an ElevenLabs API key is saved in EncryptedSharedPreferences and internet is available.
-     * - Automatically falls back to Android TextToSpeech if the key is missing, internet is unavailable,
-     *   ElevenLabs returns an HTTP/quota/auth error, or MediaPlayer fails.
+     * - Plays cached MP3 immediately if SHA-256 text hash already exists on disk.
+     * - Uses ElevenLabs cloud voice (`EXAVITQu4vr4xnSDxMaL`) ONLY when:
+     *   1. ElevenLabs key is saved,
+     *   2. Cloud voice is not paused for 24h from a prior 401/402 error,
+     *   3. `isWakeUpBriefing == true` OR `cleanText.length < 200`, and
+     *   4. Internet is available.
+     * - Otherwise speaks via Android TTS fallback (rate 1.0x, selected voice, short sentences with small pauses).
      */
     fun speak(
         text: String,
         fallbackSpeechRate: Float = DEFAULT_FALLBACK_RATE,
+        isWakeUpBriefing: Boolean = false,
         onComplete: (() -> Unit)? = null
     ) {
         val cleanText = AiClient.sanitizeForSpeech(text)
@@ -181,19 +379,56 @@ class VoiceEngine(
 
         stop()
         onSpeakingStateChanged(true)
+        syncPersistedCloudState(securePrefs)
 
         activeSpeakJob = engineScope.launch {
             val savedElevenKey = securePrefs.elevenLabsApiKey
+            val voiceId = securePrefs.elevenLabsVoiceId
+            val eligibleForCloud = isWakeUpBriefing || cleanText.length < MAX_CLOUD_REPLY_CHARS
 
             if (savedElevenKey.isBlank()) {
-                Log.d(
-                    TAG,
-                    "No ElevenLabs API key saved in EncryptedSharedPreferences. Falling back to Android TTS."
-                )
                 updateExternalDiagnostic(
-                    "No ElevenLabs key saved — speaking via Android TTS (${String.format(Locale.US, "%.2fx", fallbackSpeechRate)}).",
+                    "Android TTS active (${String.format(Locale.US, "%.2fx", fallbackSpeechRate)}). Save an ElevenLabs key to enable cloud voice ($voiceId).",
                     isError = false
                 )
+                speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
+                return@launch
+            }
+
+            // Gate cloud voice strictly to wake-up briefings and replies under 200 characters
+            if (!eligibleForCloud) {
+                speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
+                return@launch
+            }
+
+            // If this exact phrase is already cached by text hash, play from disk with zero API calls
+            val cachedMp3 = ElevenLabsClient.getCachedAudioFile(appContext, cleanText, voiceId)
+            if (cachedMp3 != null) {
+                val startedCached = playMp3FileWithMediaPlayer(
+                    mp3File = cachedMp3,
+                    fallbackText = cleanText,
+                    fallbackSpeechRate = fallbackSpeechRate,
+                    onComplete = onComplete
+                )
+                if (startedCached) {
+                    if (!securePrefs.isElevenLabsCurrentlyPaused()) {
+                        updateExternalDiagnostic(
+                            "Playing cached ElevenLabs audio (${cachedMp3.name.take(16)}..., 0 chars used).",
+                            isError = false
+                        )
+                    }
+                    return@launch
+                }
+            }
+
+            // Respect 24-hour pause after HTTP 401 or 402 without retrying
+            if (securePrefs.isElevenLabsCurrentlyPaused()) {
+                val pauseMsg = securePrefs.elevenLabsPauseMessage.ifBlank {
+                    "ElevenLabs cloud voice is paused for 24 hours. Using Android TTS (1.0x)."
+                }
+                _cloudPausedUntilFlow.value = securePrefs.elevenLabsPausedUntilMillis
+                _cloudPauseMessageFlow.value = pauseMsg
+                updateExternalDiagnostic(pauseMsg, isError = true)
                 speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
                 return@launch
             }
@@ -201,32 +436,34 @@ class VoiceEngine(
             if (!hasActiveInternet()) {
                 Log.w(TAG, "No internet connection available. Falling back to Android TTS.")
                 updateExternalDiagnostic(
-                    "No internet connection — fell back to Android TTS.",
-                    isError = true
+                    "Offline — speaking via Android TTS (${String.format(Locale.US, "%.2fx", fallbackSpeechRate)}).",
+                    isError = false
                 )
                 speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
                 return@launch
             }
 
-            updateExternalDiagnostic(
-                "Synthesizing speech via ElevenLabs (21m00Tcm4TlvDq8ikWAM)...",
-                isError = false
-            )
-
             try {
                 val synthesisResult = ElevenLabsClient.synthesizeToCacheFile(
                     context = appContext,
                     text = cleanText,
-                    rawApiKey = savedElevenKey
+                    rawApiKey = savedElevenKey,
+                    voiceId = voiceId
                 )
 
                 if (!isActive) {
-                    synthesisResult.getOrNull()?.audioFile?.delete()
                     return@launch
                 }
 
                 synthesisResult.fold(
                     onSuccess = { synth ->
+                        val totalUsed = if (!synth.fromCache && synth.charCount > 0) {
+                            securePrefs.addElevenLabsCharsUsed(synth.charCount)
+                        } else {
+                            securePrefs.elevenLabsCharsUsedThisMonth
+                        }
+                        _monthlyCharsUsedFlow.value = totalUsed
+
                         val started = playMp3FileWithMediaPlayer(
                             mp3File = synth.audioFile,
                             fallbackText = cleanText,
@@ -234,89 +471,74 @@ class VoiceEngine(
                             onComplete = onComplete
                         )
                         if (started) {
+                            val quotaWarning = if (totalUsed >= SecurePreferences.MONTHLY_ELEVENLABS_WARN_THRESHOLD) {
+                                " | Warning: $totalUsed / ${SecurePreferences.MONTHLY_ELEVENLABS_CHAR_LIMIT} chars used this month (80%+)."
+                            } else {
+                                " | Monthly usage: $totalUsed / ${SecurePreferences.MONTHLY_ELEVENLABS_CHAR_LIMIT} chars."
+                            }
                             updateExternalDiagnostic(
-                                "ElevenLabs HTTP ${synth.statusCode} OK (${synth.modelUsed}, ${synth.byteCount} bytes) — Playing neural MP3 via MediaPlayer.",
-                                isError = false
+                                "ElevenLabs voice ($voiceId) playing${if (synth.fromCache) " from hash cache" else ""}$quotaWarning",
+                                isError = totalUsed >= SecurePreferences.MONTHLY_ELEVENLABS_WARN_THRESHOLD
                             )
                         } else {
-                            // playMp3FileWithMediaPlayer already logged the error and released resources
                             speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
                         }
                     },
                     onFailure = { err ->
-                        val isFreeTier402 = (err is ElevenLabsApiException && err.statusCode == 402) ||
-                            (err.message?.contains("402") == true)
-
-                        if (isFreeTier402) {
-                            Log.w(
-                                TAG,
-                                "ElevenLabs returned 402 on free tier (${err.message}). Silently falling back to Android TTS (0.9x)."
-                            )
-                            updateExternalDiagnostic(
-                                "Using Android TTS (0.9x natural voice — ElevenLabs free-tier fallback active).",
-                                isError = false
-                            )
-                            speakViaAndroidTts(cleanText, DEFAULT_FALLBACK_RATE, onComplete)
-                        } else {
-                            val reason = formatElevenLabsError(err)
-                            Log.e(
-                                TAG,
-                                "ElevenLabs TTS failed ($reason). Falling back to Android TTS (0.9x).",
-                                err
-                            )
-                            updateExternalDiagnostic(
-                                "$reason -> Fell back to Android TTS (0.9x).",
-                                isError = false
-                            )
-                            speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
-                        }
+                        handleElevenLabsFailure(err, cleanText, fallbackSpeechRate, onComplete)
                     }
                 )
             } catch (ce: CancellationException) {
                 throw ce
             } catch (e: Exception) {
-                val isFreeTier402 = (e is ElevenLabsApiException && e.statusCode == 402) ||
-                    (e.message?.contains("402") == true)
-                if (isFreeTier402) {
-                    Log.w(
-                        TAG,
-                        "Caught ElevenLabs 402 on free tier (${e.message}). Silently falling back to Android TTS (0.9x)."
-                    )
-                    updateExternalDiagnostic(
-                        "Using Android TTS (0.9x natural voice — ElevenLabs free-tier fallback active).",
-                        isError = false
-                    )
-                    speakViaAndroidTts(cleanText, DEFAULT_FALLBACK_RATE, onComplete)
-                } else {
-                    val reason = formatElevenLabsError(e)
-                    Log.e(
-                        TAG,
-                        "Unexpected ElevenLabs routing error ($reason). Falling back to Android TTS (0.9x).",
-                        e
-                    )
-                    updateExternalDiagnostic(
-                        "$reason -> Fell back to Android TTS (0.9x).",
-                        isError = false
-                    )
-                    speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
-                }
+                handleElevenLabsFailure(e, cleanText, fallbackSpeechRate, onComplete)
             }
         }
     }
 
-    /**
-     * Plays the temporary MP3 file stored in `appContext.cacheDir` using an open [FileInputStream]
-     * file descriptor so Android's external `mediaserver` process can read private cache files
-     * across all Android versions (API 26-35), and guarantees `MediaPlayer.release()` + temp file
-     * cleanup after playback or on error.
-     */
+    private fun handleElevenLabsFailure(
+        err: Throwable,
+        cleanText: String,
+        fallbackSpeechRate: Float,
+        onComplete: (() -> Unit)?
+    ) {
+        val statusCode = (err as? ElevenLabsApiException)?.statusCode
+            ?: when {
+                err.message?.contains("HTTP 401") == true -> 401
+                err.message?.contains("HTTP 402") == true -> 402
+                else -> -1
+            }
+
+        if (statusCode == 401 || statusCode == 402) {
+            val clearSettingsMessage = if (statusCode == 401) {
+                "ElevenLabs API key rejected (HTTP 401). Cloud voice is paused for 24 hours — using Android voice (1.0x). Save a valid key to resume."
+            } else {
+                "ElevenLabs quota or plan limit reached (HTTP 402). Cloud voice is paused for 24 hours — using Android voice (1.0x)."
+            }
+            Log.w(TAG, clearSettingsMessage)
+            securePrefs.pauseElevenLabsFor24Hours(clearSettingsMessage)
+            _cloudPausedUntilFlow.value = securePrefs.elevenLabsPausedUntilMillis
+            _cloudPauseMessageFlow.value = clearSettingsMessage
+            updateExternalDiagnostic(clearSettingsMessage, isError = true)
+            speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
+        } else {
+            val reason = formatElevenLabsError(err)
+            Log.e(TAG, "ElevenLabs TTS failed ($reason). Falling back to Android TTS.", err)
+            updateExternalDiagnostic(
+                "$reason -> Using Android TTS (${String.format(Locale.US, "%.2fx", fallbackSpeechRate)}).",
+                isError = true
+            )
+            speakViaAndroidTts(cleanText, fallbackSpeechRate, onComplete)
+        }
+    }
+
     private fun playMp3FileWithMediaPlayer(
         mp3File: File,
         fallbackText: String,
         fallbackSpeechRate: Float,
         onComplete: (() -> Unit)?
     ): Boolean {
-        releaseMediaPlayerResources(mediaPlayer, activeTempMp3File)
+        releaseMediaPlayerResources(mediaPlayer, activeMp3File, deleteCorruptFile = false)
 
         var createdPlayer: MediaPlayer? = null
         return try {
@@ -341,7 +563,7 @@ class VoiceEngine(
             }
 
             player.setOnCompletionListener { mp ->
-                releaseMediaPlayerResources(mp, mp3File)
+                releaseMediaPlayerResources(mp, mp3File, deleteCorruptFile = false)
                 onSpeakingStateChanged(false)
                 onComplete?.invoke()
             }
@@ -351,14 +573,14 @@ class VoiceEngine(
                     "MediaPlayer playback error (what=$what, extra=$extra) -> Fell back to Android TTS."
                 Log.e(TAG, errMsg)
                 updateExternalDiagnostic(errMsg, isError = true)
-                releaseMediaPlayerResources(mp, mp3File)
+                releaseMediaPlayerResources(mp, mp3File, deleteCorruptFile = true)
                 speakViaAndroidTts(fallbackText, fallbackSpeechRate, onComplete)
                 true
             }
 
             player.prepare()
             mediaPlayer = player
-            activeTempMp3File = mp3File
+            activeMp3File = mp3File
             onSpeakingStateChanged(true)
             player.start()
             true
@@ -367,12 +589,16 @@ class VoiceEngine(
                 "MediaPlayer prepare/start failed (${e.javaClass.simpleName}: ${e.message}) -> Fell back to Android TTS."
             Log.e(TAG, errMsg, e)
             updateExternalDiagnostic(errMsg, isError = true)
-            releaseMediaPlayerResources(createdPlayer, mp3File)
+            releaseMediaPlayerResources(createdPlayer, mp3File, deleteCorruptFile = true)
             false
         }
     }
 
-    private fun releaseMediaPlayerResources(player: MediaPlayer?, tempFile: File?) {
+    private fun releaseMediaPlayerResources(
+        player: MediaPlayer?,
+        file: File?,
+        deleteCorruptFile: Boolean
+    ) {
         if (player != null) {
             try {
                 player.setOnCompletionListener(null)
@@ -397,15 +623,17 @@ class VoiceEngine(
             }
         }
 
-        if (tempFile != null) {
-            try {
-                if (tempFile.exists()) {
-                    tempFile.delete()
+        if (file != null) {
+            if (deleteCorruptFile) {
+                try {
+                    if (file.exists()) {
+                        file.delete()
+                    }
+                } catch (_: Exception) {
                 }
-            } catch (_: Exception) {
             }
-            if (activeTempMp3File == tempFile) {
-                activeTempMp3File = null
+            if (activeMp3File == file) {
+                activeMp3File = null
             }
         }
     }
@@ -434,17 +662,52 @@ class VoiceEngine(
             return
         }
 
-        activeOnDoneCallback = onComplete
+        val savedVoiceName = securePrefs.androidTtsVoiceName
+        if (savedVoiceName.isNotBlank()) {
+            try {
+                val targetVoice = engine.voices?.firstOrNull { it.name == savedVoiceName }
+                if (targetVoice != null && engine.voice?.name != targetVoice.name) {
+                    engine.voice = targetVoice
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        val sentences = splitIntoShortSentences(safeText)
+        if (sentences.isEmpty()) {
+            onSpeakingStateChanged(false)
+            onComplete?.invoke()
+            return
+        }
+
         engine.setPitch(DEFAULT_FALLBACK_PITCH)
         engine.setSpeechRate(naturalRate.coerceIn(0.6f, 1.8f))
-        val res = engine.speak(
-            safeText,
-            TextToSpeech.QUEUE_FLUSH,
-            null,
-            "xestlab_voice_${System.currentTimeMillis()}"
-        )
-        if (res == TextToSpeech.ERROR) {
+
+        val batchPrefix = "xestlab_${System.currentTimeMillis()}"
+        val finalUtteranceId = "${batchPrefix}_${sentences.lastIndex}"
+        activeFinalUtteranceId = finalUtteranceId
+        activeOnDoneCallback = onComplete
+
+        var firstError = false
+        sentences.forEachIndexed { idx, sentence ->
+            val utteranceId = "${batchPrefix}_$idx"
+            val queueMode = if (idx == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            val res = engine.speak(sentence, queueMode, null, utteranceId)
+            if (res == TextToSpeech.ERROR && idx == 0) {
+                firstError = true
+            }
+            if (!firstError && idx < sentences.lastIndex) {
+                engine.playSilentUtterance(
+                    SENTENCE_PAUSE_MS,
+                    TextToSpeech.QUEUE_ADD,
+                    "${batchPrefix}_pause_$idx"
+                )
+            }
+        }
+
+        if (firstError) {
             Log.e(TAG, "Android TextToSpeech.speak() returned ERROR")
+            activeFinalUtteranceId = null
             activeOnDoneCallback = null
             onSpeakingStateChanged(false)
             onComplete?.invoke()
@@ -481,6 +744,7 @@ class VoiceEngine(
 
         queuedFallbackText = null
         queuedOnDone = null
+        activeFinalUtteranceId = null
         activeOnDoneCallback = null
 
         try {
@@ -488,7 +752,7 @@ class VoiceEngine(
         } catch (_: Exception) {
         }
 
-        releaseMediaPlayerResources(mediaPlayer, activeTempMp3File)
+        releaseMediaPlayerResources(mediaPlayer, activeMp3File, deleteCorruptFile = false)
         onSpeakingStateChanged(false)
     }
 

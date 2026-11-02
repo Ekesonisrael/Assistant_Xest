@@ -45,28 +45,31 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
+data class WakeWordDiagnostics(
+    val micLevel: Int = 0,
+    val audioFramesReceived: Long = 0L,
+    val currentScore: Float = 0.0f,
+    val peakScore: Float = 0.0f,
+    val lastDetectionTimeMillis: Long = 0L,
+    val serviceState: String = "Stopped",
+    val audioSource: String = "MIC",
+    val lastError: String = "None",
+    val isMicSilentWarning: Boolean = false
+)
+
 /**
  * Resilient Foreground Service running the 3-model openWakeWord ONNX Runtime pipeline
- * (`melspectrogram.onnx` -> `embedding_model.onnx` -> `hey_jarvis_v0.1.onnx`) in an
- * infinite `while (isListening)` Coroutine loop:
+ * (`melspectrogram.onnx` -> `embedding_model.onnx` -> `hey_jarvis_v0.1.onnx`).
  *
- * - Dynamically sizes `AudioRecord` via `AudioRecord.getMinBufferSize()`.
- * - Never breaks on empty/null reads; catches & logs any audio/ONNX exception and immediately
- *   restarts the recording loop so wake-word listening never times out or drops out.
- * - Holds a `PARTIAL_WAKE_LOCK` while active so CPU inference is never throttled when the screen dims.
- * - Executes the full Jarvis conversation loop when `score > 0.20`:
- *   1. Stop the AudioRecord stream.
- *   2. Play activation chime.
- *   3. Speak "Yes? What do you need?" via VoiceEngine (ElevenLabs or Android TTS fallback).
- *   4. Start SpeechRecognizer to capture command.
- *   5. Route to Groq ("openai/gpt-oss-120b") or local briefing/task intents.
- *   6. Speak response via VoiceEngine.
- *   7. Immediately restart the infinite `while (isListening)` wake-word loop.
+ * - Starts ONLY while the app is visible or directly from a user tap.
+ * - After reboot, posts a notification "Tap to start listening" instead of starting the mic from background.
+ * - Publishes live 5Hz diagnostics (`diagnosticsFlow`) for Settings.
  */
 class WakeWordService : Service() {
 
@@ -75,14 +78,23 @@ class WakeWordService : Service() {
 
         const val CHANNEL_ID = "xestlab_wake_word_channel"
         const val NOTIFICATION_ID = 7701
+        const val REBOOT_TAP_NOTIFICATION_ID = 7702
         const val ACTIVE_NOTIFICATION_TEXT = "Listening for 'Hey Jarvis'..."
-        const val WAKE_WORD_THRESHOLD = 0.20f
+        const val SILENT_MIC_WARNING_MESSAGE =
+            "Mic is silent. Another app may be using it, or Android blocked background capture."
+        const val WAKE_WORD_THRESHOLD = SecurePreferences.DEFAULT_WAKE_WORD_THRESHOLD
+
+        const val EXTRA_START_WAKE_WORD_FROM_TAP = "com.xestlab.assistant.extra.START_WAKE_WORD_FROM_TAP"
+        const val EXTRA_INITIATED_FROM_FOREGROUND_OR_TAP =
+            "com.xestlab.assistant.extra.INITIATED_FROM_FG_OR_TAP"
 
         const val ACTION_START_OR_RELOAD = "com.xestlab.assistant.action.WAKE_START_OR_RELOAD"
         const val ACTION_STOP_SERVICE = "com.xestlab.assistant.action.WAKE_STOP_SERVICE"
         const val ACTION_TEMP_PAUSE = "com.xestlab.assistant.action.WAKE_TEMP_PAUSE"
         const val ACTION_TEMP_RESUME = "com.xestlab.assistant.action.WAKE_TEMP_RESUME"
         const val ACTION_TEST_JARVIS_LOOP = "com.xestlab.assistant.action.WAKE_TEST_JARVIS_LOOP"
+
+        private val isAppVisibleFlag = AtomicBoolean(false)
 
         private val _isRunningFlow = MutableStateFlow(false)
         val isRunningFlow: StateFlow<Boolean> = _isRunningFlow.asStateFlow()
@@ -95,9 +107,42 @@ class WakeWordService : Service() {
         private val _statusIsErrorFlow = MutableStateFlow(false)
         val statusIsErrorFlow: StateFlow<Boolean> = _statusIsErrorFlow.asStateFlow()
 
+        private val _diagnosticsFlow = MutableStateFlow(WakeWordDiagnostics())
+        val diagnosticsFlow: StateFlow<WakeWordDiagnostics> = _diagnosticsFlow.asStateFlow()
+
+        fun setAppVisible(visible: Boolean) {
+            isAppVisibleFlag.set(visible)
+        }
+
+        fun isAppCurrentlyVisible(): Boolean = isAppVisibleFlag.get()
+
+        fun syncPersistedDiagnostics(context: Context) {
+            val prefs = SecurePreferences(context.applicationContext)
+            _diagnosticsFlow.update { current ->
+                current.copy(lastDetectionTimeMillis = prefs.lastWakeWordDetectionMillis)
+            }
+        }
+
         fun updateExternalStatus(message: String, isError: Boolean) {
             _statusMessageFlow.value = message
             _statusIsErrorFlow.value = isError
+            if (isError) {
+                _diagnosticsFlow.update { it.copy(lastError = message) }
+            }
+        }
+
+        private fun updateServiceState(
+            state: String,
+            audioSource: String? = null,
+            error: String? = null
+        ) {
+            _diagnosticsFlow.update { current ->
+                current.copy(
+                    serviceState = state,
+                    audioSource = audioSource ?: current.audioSource,
+                    lastError = error ?: current.lastError
+                )
+            }
         }
 
         fun hasRecordAudioPermission(context: Context): Boolean {
@@ -107,36 +152,113 @@ class WakeWordService : Service() {
             ) == PackageManager.PERMISSION_GRANTED
         }
 
-        fun start(context: Context) {
+        /**
+         * Starts WakeWordService ONLY when the app is currently visible OR explicitly initiated by a user tap.
+         */
+        fun start(context: Context, initiatedByUserTap: Boolean = false) {
             val appContext = context.applicationContext
-            if (!hasRecordAudioPermission(appContext)) {
-                updateExternalStatus(
-                    "RECORD_AUDIO permission is required before starting WakeWordService.",
-                    true
+            syncPersistedDiagnostics(appContext)
+
+            if (!isAppVisibleFlag.get() && !initiatedByUserTap) {
+                Log.i(
+                    TAG,
+                    "Skipping background WakeWordService start (app not visible and not initiated by tap)."
                 )
+                updateServiceState("Waiting for app open or user tap")
                 return
             }
+
+            if (!hasRecordAudioPermission(appContext)) {
+                val msg = "RECORD_AUDIO permission is required before starting WakeWordService."
+                updateServiceState("Permission Required", error = msg)
+                updateExternalStatus(msg, true)
+                return
+            }
+
+            cancelRebootTapNotification(appContext)
+
             val intent = Intent(appContext, WakeWordService::class.java).apply {
                 action = ACTION_START_OR_RELOAD
+                putExtra(EXTRA_INITIATED_FROM_FOREGROUND_OR_TAP, true)
             }
             try {
+                updateServiceState("Starting...")
                 ContextCompat.startForegroundService(appContext, intent)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start WakeWordService", e)
-                updateExternalStatus(
-                    "Failed to start WakeWordService: ${e.javaClass.simpleName}: ${e.message}",
-                    true
-                )
+                val errMsg = "Failed to start WakeWordService: ${e.javaClass.simpleName}: ${e.message}"
+                updateServiceState("Blocked / Error", error = errMsg)
+                updateExternalStatus(errMsg, true)
+            }
+        }
+
+        fun postRebootTapToStartNotification(context: Context) {
+            val appContext = context.applicationContext
+            val manager =
+                appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Background Wake Word Service",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Tap to start 'Hey Jarvis' wake word listener after device reboot"
+                setShowBadge(true)
+            }
+            manager.createNotificationChannel(channel)
+
+            val openIntent = Intent(appContext, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(EXTRA_START_WAKE_WORD_FROM_TAP, true)
+            }
+            val openPending = PendingIntent.getActivity(
+                appContext,
+                REBOOT_TAP_NOTIFICATION_ID,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle("Xestlab Assistant")
+                .setContentText("Tap to start listening")
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .setAutoCancel(true)
+                .setContentIntent(openPending)
+                .build()
+
+            try {
+                manager.notify(REBOOT_TAP_NOTIFICATION_ID, notification)
+                updateServiceState("Paused after reboot — Tap notification to start")
+            } catch (_: SecurityException) {
+            }
+        }
+
+        fun cancelRebootTapNotification(context: Context) {
+            try {
+                val manager =
+                    context.applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.cancel(REBOOT_TAP_NOTIFICATION_ID)
+            } catch (_: Exception) {
             }
         }
 
         fun stop(context: Context) {
             val appContext = context.applicationContext
+            cancelRebootTapNotification(appContext)
             try {
                 appContext.stopService(Intent(appContext, WakeWordService::class.java))
             } catch (_: Exception) {
             }
             _isRunningFlow.value = false
+            _diagnosticsFlow.update {
+                it.copy(
+                    micLevel = 0,
+                    currentScore = 0.0f,
+                    serviceState = "Stopped",
+                    isMicSilentWarning = false
+                )
+            }
             updateExternalStatus("Background 'Hey Jarvis' wake word listener stopped.", false)
         }
 
@@ -167,22 +289,21 @@ class WakeWordService : Service() {
         fun triggerJarvisLoopTest(context: Context) {
             val appContext = context.applicationContext
             if (!hasRecordAudioPermission(appContext)) {
-                updateExternalStatus(
-                    "Grant RECORD_AUDIO permission first to test the Jarvis conversation loop.",
-                    true
-                )
+                val err = "Grant RECORD_AUDIO permission first to test the Jarvis conversation loop."
+                updateServiceState("Permission Required", error = err)
+                updateExternalStatus(err, true)
                 return
             }
             val intent = Intent(appContext, WakeWordService::class.java).apply {
                 action = ACTION_TEST_JARVIS_LOOP
+                putExtra(EXTRA_INITIATED_FROM_FOREGROUND_OR_TAP, true)
             }
             try {
                 ContextCompat.startForegroundService(appContext, intent)
             } catch (e: Exception) {
-                updateExternalStatus(
-                    "Unable to trigger Jarvis loop: ${e.javaClass.simpleName}: ${e.message}",
-                    true
-                )
+                val err = "Unable to trigger Jarvis loop: ${e.javaClass.simpleName}: ${e.message}"
+                updateServiceState("Error", error = err)
+                updateExternalStatus(err, true)
             }
         }
     }
@@ -230,6 +351,7 @@ class WakeWordService : Service() {
             context = applicationContext,
             securePrefs = securePrefs
         )
+        syncPersistedDiagnostics(applicationContext)
         ensureNotificationChannel()
     }
 
@@ -240,6 +362,7 @@ class WakeWordService : Service() {
             ACTION_STOP_SERVICE -> {
                 securePrefs.isWakeWordEnabled = false
                 isListeningState.set(false)
+                updateServiceState("Stopped")
                 updateExternalStatus("Wake word disabled from notification.", false)
                 stopDetectionCoroutine()
                 releaseCpuWakeLock()
@@ -252,6 +375,7 @@ class WakeWordService : Service() {
                 isTemporarilyPausedForUiMic.set(true)
                 isListeningState.set(false)
                 stopDetectionCoroutine()
+                updateServiceState("Paused (In-app mic active)")
                 updateForegroundNotification("Paused briefly while in-app mic is active")
                 return START_STICKY
             }
@@ -280,11 +404,20 @@ class WakeWordService : Service() {
             }
         }
 
+        // Guard against background restart when app is not visible and not initiated by tap
+        val explicitlyInitiated = intent?.getBooleanExtra(EXTRA_INITIATED_FROM_FOREGROUND_OR_TAP, false) == true
+        if (!isAppVisibleFlag.get() && !explicitlyInitiated && !_isRunningFlow.value) {
+            if (securePrefs.isWakeWordEnabled) {
+                postRebootTapToStartNotification(applicationContext)
+            }
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         if (!hasRecordAudioPermission(this)) {
-            updateExternalStatus(
-                "Microphone permission (RECORD_AUDIO) is required. Grant permission in Settings.",
-                true
-            )
+            val err = "Microphone permission (RECORD_AUDIO) is required. Grant permission in Settings."
+            updateServiceState("Permission Missing", error = err)
+            updateExternalStatus(err, true)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -305,11 +438,6 @@ class WakeWordService : Service() {
         return START_STICKY
     }
 
-    /**
-     * Starts an infinite `while (isListening)` Coroutine running the 3-model openWakeWord ONNX
-     * pipeline (`AudioRecord` -> `melspectrogram.onnx` -> `embedding_model.onnx` -> `hey_jarvis_v0.1.onnx`).
-     * Never breaks on transient empty reads or recoverable audio/ONNX exceptions.
-     */
     private fun startOnnxDetectionLoop() {
         if (isStopping.get() || isTemporarilyPausedForUiMic.get() || isInConversationLoop.get()) {
             return
@@ -323,16 +451,15 @@ class WakeWordService : Service() {
             openWakeWordPipeline = it
         }
 
+        val currentThreshold = securePrefs.wakeWordThreshold
         updateForegroundNotification(ACTIVE_NOTIFICATION_TEXT)
+        updateServiceState("Listening")
         updateExternalStatus(
-            "$ACTIVE_NOTIFICATION_TEXT (ONNX 3-model pipeline active, threshold > 0.20)",
+            "$ACTIVE_NOTIFICATION_TEXT (2 of last 3 > ${String.format(Locale.US, "%.2f", currentThreshold)})",
             false
         )
 
         detectionLoopJob = serviceScope.launch {
-            var lastUiReportMs = 0L
-            var peakRecentScore = 0.0f
-
             while (isListening &&
                 isActive &&
                 !isStopping.get() &&
@@ -343,26 +470,48 @@ class WakeWordService : Service() {
                 try {
                     var triggeredScore: Float? = null
                     pipeline.runDetectionLoop(
-                        triggerThreshold = WAKE_WORD_THRESHOLD,
-                        onScoreUpdate = { score ->
-                            if (score > peakRecentScore) {
-                                peakRecentScore = score
-                            }
-                            val now = System.currentTimeMillis()
-                            if (now - lastUiReportMs >= 1_500L) {
-                                lastUiReportMs = now
-                                val formatted = String.format(Locale.US, "%.3f", peakRecentScore)
-                                updateExternalStatus(
-                                    "$ACTIVE_NOTIFICATION_TEXT | Peak score: $formatted (triggers > 0.20)",
-                                    false
+                        thresholdProvider = { securePrefs.wakeWordThreshold },
+                        onTelemetryUpdate = { telemetry ->
+                            _diagnosticsFlow.update { current ->
+                                current.copy(
+                                    micLevel = telemetry.micLevel,
+                                    audioFramesReceived = telemetry.audioFramesReceived,
+                                    currentScore = telemetry.currentScore,
+                                    peakScore = maxOf(current.peakScore, telemetry.peakScore),
+                                    serviceState = "Listening (${telemetry.audioSourceLabel})",
+                                    audioSource = telemetry.audioSourceLabel,
+                                    isMicSilentWarning = telemetry.isSilentFor5Seconds
                                 )
-                                peakRecentScore = 0.0f
+                            }
+                            if (telemetry.isSilentFor5Seconds) {
+                                _statusMessageFlow.value = SILENT_MIC_WARNING_MESSAGE
+                                _statusIsErrorFlow.value = true
+                            } else if (_statusIsErrorFlow.value &&
+                                _statusMessageFlow.value == SILENT_MIC_WARNING_MESSAGE
+                            ) {
+                                val threshStr = String.format(Locale.US, "%.2f", securePrefs.wakeWordThreshold)
+                                _statusMessageFlow.value =
+                                    "$ACTIVE_NOTIFICATION_TEXT (source=${telemetry.audioSourceLabel}, threshold > $threshStr)"
+                                _statusIsErrorFlow.value = false
+                            }
+                        },
+                        onSourceSwitched = { fromSrc, toSrc ->
+                            val switchNote = "Mic silent for 5s on $fromSrc — switched to $toSrc"
+                            _diagnosticsFlow.update { current ->
+                                current.copy(
+                                    serviceState = "Switching source ($fromSrc -> $toSrc)",
+                                    audioSource = toSrc,
+                                    lastError = switchNote,
+                                    isMicSilentWarning = true
+                                )
                             }
                         },
                         onStreamRecovering = { err ->
-                            Log.w(TAG, "Recovering wake word AudioRecord stream: ${err.message}")
+                            val errText = "${err.javaClass.simpleName}: ${err.message ?: "Audio stream error"}"
+                            Log.w(TAG, "Recovering wake word AudioRecord stream: $errText")
+                            updateServiceState("Recovering audio stream", error = errText)
                             updateExternalStatus(
-                                "Audio stream interrupted (${err.javaClass.simpleName}) — restarting mic immediately...",
+                                "Audio stream interrupted ($errText) — restarting mic...",
                                 true
                             )
                         },
@@ -380,7 +529,6 @@ class WakeWordService : Service() {
                         break
                     }
 
-                    // If we did NOT trigger and should still be listening, never exit — restart immediately
                     if (isListening &&
                         isActive &&
                         !isStopping.get() &&
@@ -388,17 +536,15 @@ class WakeWordService : Service() {
                         !isInConversationLoop.get() &&
                         securePrefs.isWakeWordEnabled
                     ) {
-                        Log.w(TAG, "runDetectionLoop returned without trigger while isListening=true; restarting immediately")
                         delay(250L)
                     }
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (e: Exception) {
-                    Log.e(TAG, "openWakeWord ONNX loop exception; restarting immediately: ${e.message}", e)
-                    updateExternalStatus(
-                        "ONNX pipeline error (${e.javaClass.simpleName}: ${e.message}). Restarting immediately...",
-                        true
-                    )
+                    val errText = "${e.javaClass.simpleName}: ${e.message ?: "ONNX pipeline error"}"
+                    Log.e(TAG, "openWakeWord ONNX loop exception; restarting immediately: $errText", e)
+                    updateServiceState("Restarting after error", error = errText)
+                    updateExternalStatus("ONNX pipeline error ($errText). Restarting...", true)
                     updateForegroundNotification(ACTIVE_NOTIFICATION_TEXT)
                     delay(400L)
                 }
@@ -414,18 +560,24 @@ class WakeWordService : Service() {
         job?.cancel()
     }
 
-    /**
-     * Triggered when `hey_jarvis_v0.1.onnx` score > 0.20:
-     * 1. Stop AudioRecord stream.
-     * 2. Play chime.
-     * 3. Speak "Yes? What do you need?" via VoiceEngine (ElevenLabs / Android TTS).
-     * 4. Start SpeechRecognizer to capture command.
-     */
     private fun onWakeWordTriggered(score: Float) {
         if (isStopping.get()) return
         if (!isInConversationLoop.compareAndSet(false, true)) return
 
         stopDetectionCoroutine()
+
+        val nowMs = System.currentTimeMillis()
+        securePrefs.lastWakeWordDetectionMillis = nowMs
+        _diagnosticsFlow.update { current ->
+            current.copy(
+                micLevel = 0,
+                currentScore = score,
+                peakScore = maxOf(current.peakScore, score),
+                lastDetectionTimeMillis = nowMs,
+                serviceState = "Detected — Prompting",
+                isMicSilentWarning = false
+            )
+        }
 
         val scoreStr = String.format(Locale.US, "%.2f", score)
         updateExternalStatus(
@@ -451,13 +603,13 @@ class WakeWordService : Service() {
                 }
 
                 mainHandler.post {
-                    // Safety fallback so SpeechRecognizer always launches even if an OEM TTS callback stalls
                     mainHandler.postDelayed(proceedToRecognizer, 12_000L)
                     val engine = voiceEngine
                     if (engine != null) {
                         engine.speak(
                             text = "Yes? What do you need?",
                             fallbackSpeechRate = speechRate,
+                            isWakeUpBriefing = false,
                             onComplete = {
                                 mainHandler.removeCallbacks(proceedToRecognizer)
                                 mainHandler.postDelayed(proceedToRecognizer, 200L)
@@ -482,24 +634,21 @@ class WakeWordService : Service() {
         }
     }
 
-    /**
-     * Starts Android SpeechRecognizer on the Main thread to capture the user's command.
-     */
     private fun startCommandSpeechRecognizer() {
         if (isStopping.get()) {
             isInConversationLoop.set(false)
             return
         }
         if (!hasRecordAudioPermission(this) || !SpeechRecognizer.isRecognitionAvailable(this)) {
-            updateExternalStatus(
-                "SpeechRecognizer unavailable or RECORD_AUDIO missing. Restarting 'Hey Jarvis' listener.",
-                true
-            )
+            val err = "SpeechRecognizer unavailable or RECORD_AUDIO missing."
+            updateServiceState("SpeechRecognizer Unavailable", error = err)
+            updateExternalStatus("$err Restarting 'Hey Jarvis' listener.", true)
             restartWakeWordLoopOnMain()
             return
         }
 
         destroySpeechRecognizerOnMain()
+        updateServiceState("Capturing Command")
         updateExternalStatus("Listening to your command...", false)
         updateForegroundNotification("Listening to your command...")
 
@@ -560,20 +709,18 @@ class WakeWordService : Service() {
             mainHandler.postDelayed(recognizerWatchdogRunnable, 15_000L)
             recognizer.startListening(recognizeIntent)
         } catch (e: Exception) {
-            Log.e(TAG, "SpeechRecognizer failed to start: ${e.message}", e)
+            val err = "SpeechRecognizer error: ${e.message}"
+            Log.e(TAG, err, e)
             mainHandler.removeCallbacks(recognizerWatchdogRunnable)
             destroySpeechRecognizerOnMain()
-            updateExternalStatus("SpeechRecognizer error: ${e.message}", true)
+            updateServiceState("Recognizer Error", error = err)
+            updateExternalStatus(err, true)
             restartWakeWordLoopOnMain()
         }
     }
 
-    /**
-     * Routes the recognized voice command to Groq ("openai/gpt-oss-120b") or dynamic local
-     * briefing/task intents, speaks the response aloud via VoiceEngine, and immediately
-     * restarts the infinite ONNX wake-word loop.
-     */
     private fun routeCommandToGroqAndSpeak(spokenCommand: String) {
+        updateServiceState("Thinking (Groq)")
         updateExternalStatus("Sending to Groq: \"$spokenCommand\"", false)
         updateForegroundNotification("Thinking...")
 
@@ -585,6 +732,7 @@ class WakeWordService : Service() {
                 val speechRate = userPrefs.voiceSpeed.coerceIn(0.6f, 1.8f)
 
                 val parsed = AssistantParser.parse(spokenCommand)
+                var isBriefingReply = false
                 val replyToSpeak: String = when (parsed) {
                     is ParsedIntent.ExplicitNote -> {
                         repository.saveItem(
@@ -601,6 +749,7 @@ class WakeWordService : Service() {
                     }
 
                     is ParsedIntent.ReadPlan -> {
+                        isBriefingReply = true
                         val briefing = TtsGreetingHelper.buildDynamicBriefing(db, displayName)
                         repository.recordTurn("ASSISTANT", briefing)
                         briefing
@@ -678,11 +827,13 @@ class WakeWordService : Service() {
                     }
                 }
 
+                val isWakeBrief = isBriefingReply
                 mainHandler.post {
                     if (isStopping.get()) {
                         isInConversationLoop.set(false)
                         return@post
                     }
+                    updateServiceState("Speaking Reply")
                     updateForegroundNotification("Speaking response...")
                     val resumed = AtomicBoolean(false)
                     val resumeAction = Runnable {
@@ -690,7 +841,6 @@ class WakeWordService : Service() {
                             restartWakeWordLoopOnMain()
                         }
                     }
-                    // Safety watchdog so wake word ALWAYS resumes even if audio playback stalls
                     mainHandler.postDelayed(resumeAction, 45_000L)
 
                     val engine = voiceEngine
@@ -698,6 +848,7 @@ class WakeWordService : Service() {
                         engine.speak(
                             text = replyToSpeak,
                             fallbackSpeechRate = speechRate,
+                            isWakeUpBriefing = isWakeBrief,
                             onComplete = {
                                 mainHandler.removeCallbacks(resumeAction)
                                 mainHandler.postDelayed(resumeAction, 250L)
@@ -709,9 +860,11 @@ class WakeWordService : Service() {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Jarvis conversation loop error: ${e.message}", e)
+                val err = "Jarvis loop error: ${e.message}"
+                Log.e(TAG, err, e)
                 mainHandler.post {
-                    updateExternalStatus("Jarvis loop error: ${e.message}", true)
+                    updateServiceState("Error", error = err)
+                    updateExternalStatus(err, true)
                     restartWakeWordLoopOnMain()
                 }
             }
@@ -822,11 +975,10 @@ class WakeWordService : Service() {
             }
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Foreground service start blocked by OS", e)
-            updateExternalStatus(
-                "Foreground microphone service blocked by OS: ${e.javaClass.simpleName}: ${e.message}",
-                true
-            )
+            val err = "Foreground microphone service blocked by OS: ${e.javaClass.simpleName}: ${e.message}"
+            Log.e(TAG, err, e)
+            updateServiceState("Blocked by OS", error = err)
+            updateExternalStatus(err, true)
             false
         }
     }
@@ -898,6 +1050,14 @@ class WakeWordService : Service() {
         isStopping.set(true)
         isListeningState.set(false)
         _isRunningFlow.value = false
+        _diagnosticsFlow.update {
+            it.copy(
+                micLevel = 0,
+                currentScore = 0.0f,
+                serviceState = "Stopped",
+                isMicSilentWarning = false
+            )
+        }
         mainHandler.removeCallbacksAndMessages(null)
         destroySpeechRecognizerOnMain()
         stopDetectionCoroutine()

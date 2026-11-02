@@ -31,7 +31,7 @@ import kotlinx.coroutines.launch
         ConversationTurn::class,
         UnreadEmailEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -120,6 +120,17 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `selectedVoiceName` TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "UPDATE `user_settings` SET `voiceSpeed` = 1.0 WHERE ABS(`voiceSpeed` - 0.9) < 0.001"
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val appContext = context.applicationContext
@@ -128,8 +139,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "xestlab_assistant.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
-                    .fallbackToDestructiveMigrationOnDowngrade()
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)
@@ -192,8 +202,9 @@ abstract class AppDatabase : RoomDatabase() {
                     quietHoursStart = "22:00",
                     quietHoursEnd = "07:00",
                     quietHoursEnabled = true,
-                    voiceSpeed = 0.9f,
-                    isFirstRunComplete = false
+                    voiceSpeed = 1.0f,
+                    isFirstRunComplete = false,
+                    selectedVoiceName = ""
                 )
             )
 

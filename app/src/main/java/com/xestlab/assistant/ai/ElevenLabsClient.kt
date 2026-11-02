@@ -16,6 +16,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -23,7 +24,9 @@ data class ElevenLabsSynthesisResult(
     val audioFile: File,
     val modelUsed: String,
     val statusCode: Int,
-    val byteCount: Long
+    val byteCount: Long,
+    val charCount: Int,
+    val fromCache: Boolean
 )
 
 class ElevenLabsApiException(
@@ -34,26 +37,25 @@ class ElevenLabsApiException(
 /**
  * Dedicated OkHttp client for ElevenLabs Neural Text-to-Speech.
  *
- * Endpoint: https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM
- * Headers:
- *  - "xi-api-key": <saved_elevenlabs_key>
- *  - "Content-Type": "application/json"
- * Body:
- *  {"text": "...", "model_id": "eleven_monolingual_v1", "voice_settings": {"stability": 0.5, "similarity_boost": 0.5}}
+ * - Default Voice ID: EXAVITQu4vr4xnSDxMaL
+ * - Caches synthesized MP3 audio on disk by SHA-256(voiceId + normalized text) so repeated phrases
+ *   play instantaneously without consuming monthly cloud characters.
+ * - Never retries on HTTP 401 or 402 responses so VoiceEngine can pause cloud voice for 24 hours.
  */
 object ElevenLabsClient {
 
     private const val TAG = "ElevenLabsClient"
 
-    const val VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
+    const val VOICE_ID = SecurePreferences.DEFAULT_ELEVENLABS_VOICE_ID
     const val TTS_ENDPOINT = "https://api.elevenlabs.io/v1/text-to-speech/$VOICE_ID"
 
-    const val PRIMARY_MODEL_ID = "eleven_monolingual_v1"
-    private const val FALLBACK_MULTILINGUAL_MODEL_ID = "eleven_multilingual_v2"
+    const val PRIMARY_MODEL_ID = "eleven_multilingual_v2"
     private const val FALLBACK_TURBO_MODEL_ID = "eleven_turbo_v2_5"
 
-    private const val TEMP_FILE_PREFIX = "elevenlabs_tts_"
-    private const val TEMP_FILE_SUFFIX = ".mp3"
+    private const val HASH_CACHE_DIR_NAME = "tts_hash_cache"
+    private const val HASH_FILE_PREFIX = "tts_"
+    private const val HASH_FILE_SUFFIX = ".mp3"
+    private const val MAX_CACHED_FILES = 150
     private const val MAX_SPEECH_CHARS = 2500
 
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
@@ -68,22 +70,76 @@ object ElevenLabsClient {
             .build()
     }
 
-    /**
-     * Synthesizes [text] via ElevenLabs and writes the resulting MP3 audio stream to a
-     * temporary file inside `context.cacheDir`.
-     *
-     * Primary call uses `eleven_monolingual_v1` with `stability = 0.5` and `similarity_boost = 0.5`.
-     * If ElevenLabs rejects `eleven_monolingual_v1` specifically due to v1 model deprecation on
-     * free/modern accounts (`model_deprecated_free_tier`), automatically retries with
-     * `eleven_multilingual_v2` / `eleven_turbo_v2_5` so neural playback still succeeds.
-     * Any auth (`401 invalid_api_key`), quota (`quota_exceeded`), rate-limit (`429`), or network
-     * failure is caught, logged via `Log.e`, and returned as `Result.failure` for instant Android TTS fallback.
-     */
+    fun normalizeSpeechText(text: String): String {
+        return AiClient.sanitizeForSpeech(text).take(MAX_SPEECH_CHARS).trim()
+    }
+
+    fun computeTextHash(text: String, voiceId: String = VOICE_ID): String {
+        val normalized = normalizeSpeechText(text)
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("$voiceId|$normalized".toByteArray(Charsets.UTF_8))
+        return buildString(digest.size * 2) {
+            for (b in digest) {
+                append(String.format(Locale.US, "%02x", b))
+            }
+        }
+    }
+
+    private fun getOrCreateHashCacheDir(context: Context): File {
+        val dir = File(context.cacheDir, HASH_CACHE_DIR_NAME)
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        return dir
+    }
+
+    fun getCachedAudioFile(
+        context: Context,
+        text: String,
+        voiceId: String = VOICE_ID
+    ): File? {
+        val cleanText = normalizeSpeechText(text)
+        if (cleanText.isEmpty()) return null
+        val hash = computeTextHash(cleanText, voiceId)
+        val cachedFile = File(getOrCreateHashCacheDir(context), "$HASH_FILE_PREFIX$hash$HASH_FILE_SUFFIX")
+        return if (cachedFile.exists() && cachedFile.length() > 64L) {
+            try {
+                cachedFile.setLastModified(System.currentTimeMillis())
+            } catch (_: Exception) {
+            }
+            cachedFile
+        } else {
+            null
+        }
+    }
+
     suspend fun synthesizeToCacheFile(
         context: Context,
         text: String,
-        rawApiKey: String
+        rawApiKey: String,
+        voiceId: String = VOICE_ID
     ): Result<ElevenLabsSynthesisResult> = withContext(Dispatchers.IO) {
+        val cleanText = normalizeSpeechText(text)
+        if (cleanText.isEmpty()) {
+            return@withContext Result.failure(IllegalArgumentException("Speech text is empty."))
+        }
+
+        val resolvedVoiceId = voiceId.trim().ifBlank { VOICE_ID }
+
+        // 1. Check deterministic SHA-256 text-hash cache first
+        getCachedAudioFile(context, cleanText, resolvedVoiceId)?.let { hitFile ->
+            return@withContext Result.success(
+                ElevenLabsSynthesisResult(
+                    audioFile = hitFile,
+                    modelUsed = "disk-cache",
+                    statusCode = 200,
+                    byteCount = hitFile.length(),
+                    charCount = 0,
+                    fromCache = true
+                )
+            )
+        }
+
         val cleanKey = SecurePreferences.sanitizeApiKey(rawApiKey)
         if (cleanKey.isBlank()) {
             val err = IllegalArgumentException("ElevenLabs API key is blank.")
@@ -91,16 +147,14 @@ object ElevenLabsClient {
             return@withContext Result.failure(err)
         }
 
-        val cleanText = AiClient.sanitizeForSpeech(text).take(MAX_SPEECH_CHARS).trim()
-        if (cleanText.isEmpty()) {
-            return@withContext Result.failure(IllegalArgumentException("Speech text is empty."))
-        }
-
-        pruneStaleCacheFiles(context.cacheDir)
+        val hashCacheDir = getOrCreateHashCacheDir(context)
+        val targetCacheFile = File(
+            hashCacheDir,
+            "$HASH_FILE_PREFIX${computeTextHash(cleanText, resolvedVoiceId)}$HASH_FILE_SUFFIX"
+        )
 
         val candidateModels = listOf(
             PRIMARY_MODEL_ID,
-            FALLBACK_MULTILINGUAL_MODEL_ID,
             FALLBACK_TURBO_MODEL_ID
         )
 
@@ -109,17 +163,27 @@ object ElevenLabsClient {
         for ((index, modelId) in candidateModels.withIndex()) {
             try {
                 val attempt = executeSingleTtsRequest(
-                    cacheDir = context.cacheDir,
+                    hashCacheDir = hashCacheDir,
+                    targetCacheFile = targetCacheFile,
+                    voiceId = resolvedVoiceId,
                     apiKey = cleanKey,
                     text = cleanText,
                     modelId = modelId
                 )
                 if (attempt.isSuccess) {
+                    evictOldestCacheFilesIfNeeded(hashCacheDir)
                     return@withContext attempt
                 }
 
                 val failure = attempt.exceptionOrNull()
                 lastError = failure
+
+                // Never retry on HTTP 401 or 402 — pause cloud voice immediately in VoiceEngine
+                if (failure is ElevenLabsApiException &&
+                    (failure.statusCode == 401 || failure.statusCode == 402)
+                ) {
+                    break
+                }
 
                 val shouldRetryNextModel = failure is ElevenLabsApiException &&
                     index < candidateModels.lastIndex &&
@@ -129,7 +193,7 @@ object ElevenLabsClient {
                     val nextModel = candidateModels[index + 1]
                     Log.w(
                         TAG,
-                        "Model '$modelId' rejected by ElevenLabs (${failure?.message}); retrying with '$nextModel'."
+                        "Model '$modelId' unsupported (${failure?.message}); trying '$nextModel'."
                     )
                     continue
                 } else {
@@ -150,12 +214,14 @@ object ElevenLabsClient {
     }
 
     private suspend fun executeSingleTtsRequest(
-        cacheDir: File,
+        hashCacheDir: File,
+        targetCacheFile: File,
+        voiceId: String,
         apiKey: String,
         text: String,
         modelId: String
     ): Result<ElevenLabsSynthesisResult> {
-        var tempFile: File? = null
+        var stagingFile: File? = null
         return try {
             val voiceSettingsJson = JSONObject().apply {
                 put("stability", 0.5)
@@ -167,14 +233,14 @@ object ElevenLabsClient {
                 put("voice_settings", voiceSettingsJson)
             }
 
-            // Convert UTF-8 bytes directly so OkHttp keeps Content-Type as exact "application/json"
             val requestBody = payloadJson
                 .toString()
                 .toByteArray(Charsets.UTF_8)
                 .toRequestBody(JSON_MEDIA_TYPE)
 
+            val endpointUrl = "https://api.elevenlabs.io/v1/text-to-speech/$voiceId"
             val request = Request.Builder()
-                .url(TTS_ENDPOINT)
+                .url(endpointUrl)
                 .header("xi-api-key", apiKey)
                 .header("Content-Type", "application/json")
                 .header("Accept", "audio/mpeg")
@@ -197,10 +263,10 @@ object ElevenLabsClient {
                         val rawErrorBody = response.body?.string().orEmpty()
                         val detail = extractReadableError(rawErrorBody)
                         val apiEx = ElevenLabsApiException(response.code, detail)
-                        if (response.code == 402) {
+                        if (response.code == 401 || response.code == 402) {
                             Log.w(
                                 TAG,
-                                "ElevenLabs HTTP 402 (free-tier library voice restriction, model=$modelId): $detail. Falling back to Android TTS (0.9x)."
+                                "ElevenLabs HTTP ${response.code} (voice=$voiceId, model=$modelId): $detail"
                             )
                         } else {
                             Log.e(
@@ -216,11 +282,11 @@ object ElevenLabsClient {
                             IOException("ElevenLabs HTTP ${response.code} returned null body.")
                         )
 
-                    val outFile = File.createTempFile(TEMP_FILE_PREFIX, TEMP_FILE_SUFFIX, cacheDir)
-                    tempFile = outFile
+                    val tmpOut = File.createTempFile("staging_", ".tmp", hashCacheDir)
+                    stagingFile = tmpOut
 
                     responseBody.byteStream().use { inputStream ->
-                        FileOutputStream(outFile).use { outputStream ->
+                        FileOutputStream(tmpOut).use { outputStream ->
                             inputStream.copyTo(outputStream, bufferSize = 8 * 1024)
                             outputStream.flush()
                             try {
@@ -230,9 +296,9 @@ object ElevenLabsClient {
                         }
                     }
 
-                    val bytesWritten = outFile.length()
+                    val bytesWritten = tmpOut.length()
                     if (bytesWritten <= 64L) {
-                        outFile.delete()
+                        tmpOut.delete()
                         val emptyEx = IOException(
                             "ElevenLabs returned invalid/empty audio stream ($bytesWritten bytes)."
                         )
@@ -240,16 +306,32 @@ object ElevenLabsClient {
                         return Result.failure(emptyEx)
                     }
 
+                    if (targetCacheFile.exists()) {
+                        targetCacheFile.delete()
+                    }
+                    val finalFile = if (tmpOut.renameTo(targetCacheFile)) {
+                        stagingFile = null
+                        targetCacheFile
+                    } else {
+                        tmpOut.copyTo(targetCacheFile, overwrite = true)
+                        tmpOut.delete()
+                        stagingFile = null
+                        targetCacheFile
+                    }
+
                     Log.i(
                         TAG,
-                        "ElevenLabs TTS success: HTTP ${response.code}, model=$modelId, bytes=$bytesWritten, file=${outFile.name}"
+                        "ElevenLabs TTS cached: HTTP ${response.code}, voice=$voiceId, model=$modelId, " +
+                            "chars=${text.length}, bytes=$bytesWritten, file=${finalFile.name}"
                     )
                     Result.success(
                         ElevenLabsSynthesisResult(
-                            audioFile = outFile,
+                            audioFile = finalFile,
                             modelUsed = modelId,
                             statusCode = response.code,
-                            byteCount = bytesWritten
+                            byteCount = bytesWritten,
+                            charCount = text.length,
+                            fromCache = false
                         )
                     )
                 }
@@ -257,17 +339,17 @@ object ElevenLabsClient {
                 cancelHandle?.dispose()
             }
         } catch (ce: CancellationException) {
-            tempFile?.delete()
+            stagingFile?.delete()
             throw ce
         } catch (e: Exception) {
-            tempFile?.delete()
+            stagingFile?.delete()
             Log.e(TAG, "ElevenLabs network/stream failure (model=$modelId): ${e.message}", e)
             Result.failure(e)
         }
     }
 
     private fun isModelDeprecationOrUnsupportedError(statusCode: Int, detail: String): Boolean {
-        if (statusCode !in setOf(400, 401, 403, 404, 422)) return false
+        if (statusCode !in setOf(400, 404, 422)) return false
         val lower = detail.lowercase(Locale.US)
         if (lower.contains("invalid_api_key") ||
             lower.contains("invalid api key") ||
@@ -280,8 +362,6 @@ object ElevenLabsClient {
         return lower.contains("model_deprecated") ||
             lower.contains("deprecated") ||
             lower.contains("model_not_found") ||
-            lower.contains("eleven_monolingual_v1") ||
-            lower.contains("free_tier") ||
             lower.contains("model")
     }
 
@@ -309,17 +389,18 @@ object ElevenLabsClient {
         }
     }
 
-    private fun pruneStaleCacheFiles(cacheDir: File) {
+    private fun evictOldestCacheFilesIfNeeded(hashCacheDir: File) {
         try {
-            val cutoff = System.currentTimeMillis() - 5 * 60_000L
-            cacheDir.listFiles { file ->
+            val mp3Files = hashCacheDir.listFiles { file ->
                 file.isFile &&
-                    file.name.startsWith(TEMP_FILE_PREFIX) &&
-                    file.name.endsWith(TEMP_FILE_SUFFIX)
-            }?.forEach { file ->
-                if (file.lastModified() < cutoff) {
-                    file.delete()
-                }
+                    file.name.startsWith(HASH_FILE_PREFIX) &&
+                    file.name.endsWith(HASH_FILE_SUFFIX)
+            } ?: return
+            if (mp3Files.size <= MAX_CACHED_FILES) return
+            mp3Files.sortBy { it.lastModified() }
+            val toDelete = mp3Files.size - MAX_CACHED_FILES
+            for (i in 0 until toDelete) {
+                mp3Files[i].delete()
             }
         } catch (_: Exception) {
         }

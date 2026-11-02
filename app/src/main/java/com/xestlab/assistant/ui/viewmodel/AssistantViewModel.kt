@@ -26,8 +26,10 @@ import com.xestlab.assistant.data.repository.AssistantRepository
 import com.xestlab.assistant.data.repository.WeeklySummaryData
 import com.xestlab.assistant.service.AlarmScheduler
 import com.xestlab.assistant.service.EmailHelper
+import com.xestlab.assistant.service.InstalledTtsVoiceInfo
 import com.xestlab.assistant.service.TtsGreetingHelper
 import com.xestlab.assistant.service.VoiceEngine
+import com.xestlab.assistant.service.WakeWordDiagnostics
 import com.xestlab.assistant.service.WakeWordService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -105,18 +107,30 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val _llmTestIsError = MutableStateFlow(false)
     val llmTestIsError: StateFlow<Boolean> = _llmTestIsError.asStateFlow()
 
-    // openWakeWord ONNX ("Hey Jarvis") Reactive State
+    // openWakeWord ONNX ("Hey Jarvis") Reactive State & Live Diagnostics
     private val _wakeWordEnabledState = MutableStateFlow(securePrefs.isWakeWordEnabled)
     val wakeWordEnabledState: StateFlow<Boolean> = _wakeWordEnabledState.asStateFlow()
 
+    private val _wakeWordThreshold = MutableStateFlow(securePrefs.wakeWordThreshold)
+    val wakeWordThreshold: StateFlow<Float> = _wakeWordThreshold.asStateFlow()
+
+    val wakeWordDiagnostics: StateFlow<WakeWordDiagnostics> = WakeWordService.diagnosticsFlow
     val wakeWordStatusText: StateFlow<String> = WakeWordService.statusMessageFlow
     val wakeWordStatusIsError: StateFlow<Boolean> = WakeWordService.statusIsErrorFlow
 
+    // ElevenLabs Cloud Voice & Android TTS Fallback Picker State
     private val _savedElevenLabsSummary = MutableStateFlow(securePrefs.maskedElevenLabsKeyPreview())
     val savedElevenLabsSummary: StateFlow<String> = _savedElevenLabsSummary.asStateFlow()
 
     val voiceStatusText: StateFlow<String> = VoiceEngine.statusMessageFlow
     val voiceStatusIsError: StateFlow<Boolean> = VoiceEngine.statusIsErrorFlow
+    val installedTtsVoices: StateFlow<List<InstalledTtsVoiceInfo>> = VoiceEngine.installedVoicesFlow
+    val monthlyElevenLabsChars: StateFlow<Int> = VoiceEngine.monthlyCharsUsedFlow
+    val elevenLabsPausedUntil: StateFlow<Long> = VoiceEngine.cloudPausedUntilFlow
+    val elevenLabsPauseMessage: StateFlow<String> = VoiceEngine.cloudPauseMessageFlow
+
+    private val _selectedAndroidVoiceName = MutableStateFlow(securePrefs.androidTtsVoiceName)
+    val selectedAndroidVoiceName: StateFlow<String> = _selectedAndroidVoiceName.asStateFlow()
 
     private val _weeklySummary = MutableStateFlow(
         WeeklySummaryData(
@@ -171,6 +185,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     init {
         securePrefs.llmProvider = LlmProvider.GROQ
         _activeProvider.value = LlmProvider.GROQ
+        VoiceEngine.syncPersistedCloudState(securePrefs)
+        WakeWordService.syncPersistedDiagnostics(appContext)
         viewModelScope.launch {
             AppDatabase.ensureSeeded(db)
             refreshDailyPlanText()
@@ -203,7 +219,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     id = 1,
                     userName = trimmedName,
                     wakeUpTime = cleanWake,
-                    voiceSpeed = 0.9f,
+                    voiceSpeed = 1.0f,
+                    selectedVoiceName = securePrefs.androidTtsVoiceName,
                     isFirstRunComplete = true
                 )
             )
@@ -215,7 +232,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             val script = repository.buildSpokenDailyPlan(isWakeUpAlarm = true)
             _dailyPlanSummary.value = script
             repository.recordTurn("ASSISTANT", script)
-            speakText(script)
+            speakText(script, isWakeUpBriefing = true)
         }
     }
 
@@ -227,7 +244,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 hasAutoReadPlanInSession = true
                 val script = repository.buildSpokenDailyPlan()
                 _dailyPlanSummary.value = script
-                speakText(script)
+                speakText(script, isWakeUpBriefing = true)
             }
         }
     }
@@ -243,14 +260,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             val script = repository.buildSpokenDailyPlan(isWakeUpAlarm = true)
             _dailyPlanSummary.value = script
             repository.recordTurn("ASSISTANT", script)
-            speakText(script)
+            speakText(script, isWakeUpBriefing = true)
         }
     }
 
-    fun speakText(text: String) {
+    fun speakText(text: String, isWakeUpBriefing: Boolean = false) {
         if (text.isBlank()) return
         val rate = prefsState.value.voiceSpeed.coerceIn(0.6f, 1.8f)
-        voiceEngine.speak(text = text, fallbackSpeechRate = rate)
+        voiceEngine.speak(
+            text = text,
+            fallbackSpeechRate = rate,
+            isWakeUpBriefing = isWakeUpBriefing
+        )
     }
 
     fun stopSpeaking() {
@@ -314,7 +335,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 is ParsedIntent.ReadPlan -> {
                     val script = repository.buildSpokenDailyPlan(isWakeUpAlarm = true)
                     _dailyPlanSummary.value = script
-                    respond(script, speak = true)
+                    respond(script, speak = true, isWakeUpBriefing = true)
                 }
 
                 is ParsedIntent.RememberFact -> {
@@ -499,10 +520,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private suspend fun respond(text: String, speak: Boolean) {
+    private suspend fun respond(
+        text: String,
+        speak: Boolean,
+        isWakeUpBriefing: Boolean = false
+    ) {
         repository.recordTurn("ASSISTANT", text)
         if (speak) {
-            speakText(text)
+            speakText(text, isWakeUpBriefing = isWakeUpBriefing)
         }
     }
 
@@ -746,6 +771,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _savedGroqSummary.value = securePrefs.maskedKeyPreview(LlmProvider.GROQ)
         _savedElevenLabsSummary.value = securePrefs.maskedElevenLabsKeyPreview()
         _wakeWordEnabledState.value = securePrefs.isWakeWordEnabled
+        _wakeWordThreshold.value = securePrefs.wakeWordThreshold
+        _selectedAndroidVoiceName.value = securePrefs.androidTtsVoiceName
+        VoiceEngine.syncPersistedCloudState(securePrefs)
+        voiceEngine.refreshInstalledVoices()
     }
 
     fun setDiagnosticError(message: String) {
@@ -841,20 +870,45 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun saveElevenLabsKey(apiKeyInput: String) {
         val cleaned = SecurePreferences.sanitizeApiKey(apiKeyInput)
         securePrefs.elevenLabsApiKey = cleaned
+        VoiceEngine.syncPersistedCloudState(securePrefs)
         refreshSavedKeySummaries()
         if (cleaned.isEmpty()) {
-            _statusBanner.value = "Cleared ElevenLabs key. Using natural Android TTS (0.9x)."
+            _statusBanner.value = "Cleared ElevenLabs key. Using Android TTS (1.0x)."
             VoiceEngine.updateExternalDiagnostic(
-                "Cleared ElevenLabs key — using Android TTS fallback (0.9x).",
+                "Cleared ElevenLabs key — using Android TTS fallback (1.0x).",
                 isError = false
             )
         } else {
             val preview = securePrefs.maskedElevenLabsKeyPreview()
             _statusBanner.value = "Encrypted & saved ElevenLabs voice key ($preview)."
             VoiceEngine.updateExternalDiagnostic(
-                "Saved ElevenLabs key in EncryptedSharedPreferences ($preview). Tap 'Test Voice' to verify.",
+                "Saved ElevenLabs key ($preview, Voice ID: ${securePrefs.elevenLabsVoiceId}). Tap 'Test Voice' to verify.",
                 isError = false
             )
+        }
+    }
+
+    fun selectAndroidTtsVoice(voiceName: String) {
+        val trimmed = voiceName.trim()
+        voiceEngine.selectAndroidVoice(trimmed)
+        _selectedAndroidVoiceName.value = trimmed
+        viewModelScope.launch {
+            userPreferencesDataStore.saveSelectedVoiceName(trimmed)
+            val existing = db.settingsDao().getSettingsDirect()
+            if (existing != null) {
+                db.settingsDao().saveSettings(existing.copy(selectedVoiceName = trimmed))
+            }
+        }
+    }
+
+    fun setFallbackVoiceSpeed(speed: Float) {
+        val clamped = speed.coerceIn(0.6f, 1.8f)
+        viewModelScope.launch {
+            userPreferencesDataStore.saveVoiceSpeed(clamped)
+            val existing = db.settingsDao().getSettingsDirect()
+            if (existing != null) {
+                db.settingsDao().saveSettings(existing.copy(voiceSpeed = clamped))
+            }
         }
     }
 
@@ -862,11 +916,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val draftClean = SecurePreferences.sanitizeApiKey(elevenLabsDraftKey)
         if (draftClean.isNotEmpty()) {
             securePrefs.elevenLabsApiKey = draftClean
+            VoiceEngine.syncPersistedCloudState(securePrefs)
             refreshSavedKeySummaries()
         }
         val displayName = prefsState.value.userName.ifBlank { "King Israel" }
         val greeting = TtsGreetingHelper.getTimeAwareGreeting(displayName)
-        speakText("$greeting Xestlab Assistant neural voice is active and ready.")
+        speakText("$greeting Xestlab Assistant voice engine is active and ready.")
     }
 
     // --- Smart IMAP Email Checker ---
@@ -951,12 +1006,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _wakeWordEnabledState.value = enabled
 
         if (enabled) {
-            WakeWordService.start(appContext)
+            WakeWordService.start(appContext, initiatedByUserTap = true)
             _statusBanner.value = "Listening for 'Hey Jarvis'... (openWakeWord ONNX active)"
         } else {
             WakeWordService.stop(appContext)
             _statusBanner.value = "'Hey Jarvis' background wake word listener stopped."
         }
+    }
+
+    fun setWakeWordThreshold(threshold: Float) {
+        val clamped = threshold.coerceIn(0.05f, 0.90f)
+        securePrefs.wakeWordThreshold = clamped
+        _wakeWordThreshold.value = clamped
     }
 
     fun testJarvisLoopFromSettings() {

@@ -1,11 +1,14 @@
 package com.xestlab.assistant.ui.theme
 
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -21,6 +24,11 @@ val Shapes8px = Shapes(
     medium = CardShape8,
     large = CardShape8,
     extraLarge = CardShape8
+)
+
+val XestlabTextSelectionColors = TextSelectionColors(
+    handleColor = TealAccent,
+    backgroundColor = TealAccent.copy(alpha = 0.35f)
 )
 
 private val XestlabDarkColorScheme = darkColorScheme(
@@ -96,7 +104,11 @@ fun XestlabTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = XestlabDarkColorScheme,
         typography = XestlabTypography,
-        shapes = Shapes8px,
-        content = content
-    )
+        shapes = Shapes8px
+    ) {
+        CompositionLocalProvider(
+            LocalTextSelectionColors provides XestlabTextSelectionColors,
+            content = content
+        )
+    }
 }

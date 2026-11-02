@@ -1,8 +1,12 @@
 package com.xestlab.assistant
 
+import android.content.Intent
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -10,8 +14,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
@@ -37,9 +44,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.xestlab.assistant.data.SecurePreferences
+import com.xestlab.assistant.service.WakeWordService
 import com.xestlab.assistant.ui.screens.HomeScreen
 import com.xestlab.assistant.ui.screens.NotesScreen
 import com.xestlab.assistant.ui.screens.PlanScreen
@@ -57,12 +67,50 @@ import com.xestlab.assistant.ui.viewmodel.AssistantViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
+        )
         super.onCreate(savedInstanceState)
+        WakeWordService.setAppVisible(true)
+        handleWakeWordTapIntent(intent)
+
         setContent {
             XestlabTheme {
                 val assistantViewModel: AssistantViewModel = viewModel()
                 AssistantRootApp(viewModel = assistantViewModel)
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        WakeWordService.setAppVisible(true)
+        val securePrefs = SecurePreferences(applicationContext)
+        if (securePrefs.isWakeWordEnabled && !WakeWordService.isRunningFlow.value) {
+            WakeWordService.start(applicationContext, initiatedByUserTap = false)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        WakeWordService.setAppVisible(true)
+        handleWakeWordTapIntent(intent)
+    }
+
+    override fun onStop() {
+        WakeWordService.setAppVisible(false)
+        super.onStop()
+    }
+
+    private fun handleWakeWordTapIntent(incoming: Intent?) {
+        if (incoming?.getBooleanExtra(WakeWordService.EXTRA_START_WAKE_WORD_FROM_TAP, false) == true) {
+            incoming.removeExtra(WakeWordService.EXTRA_START_WAKE_WORD_FROM_TAP)
+            WakeWordService.cancelRebootTapNotification(applicationContext)
+            val securePrefs = SecurePreferences(applicationContext)
+            securePrefs.isWakeWordEnabled = true
+            WakeWordService.start(applicationContext, initiatedByUserTap = true)
         }
     }
 }
@@ -107,6 +155,8 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
         return
     }
 
+    val isKeyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+
     val tabs = listOf(
         NavTab("Home", Icons.Default.Home),
         NavTab("Plan", Icons.Default.DateRange),
@@ -117,33 +167,35 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
     Scaffold(
         containerColor = BgDark,
         bottomBar = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                HorizontalDivider(thickness = 1.dp, color = BorderDark)
-                NavigationBar(
-                    containerColor = SurfaceDark,
-                    tonalElevation = 0.dp
-                ) {
-                    tabs.forEachIndexed { index, tab ->
-                        val isSelected = currentTab == index
-                        NavigationBarItem(
-                            selected = isSelected,
-                            onClick = { currentTab = index },
-                            icon = { Icon(imageVector = tab.icon, contentDescription = tab.label) },
-                            label = {
-                                Text(
-                                    text = tab.label,
-                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+            if (!isKeyboardOpen) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    HorizontalDivider(thickness = 1.dp, color = BorderDark)
+                    NavigationBar(
+                        containerColor = SurfaceDark,
+                        tonalElevation = 0.dp
+                    ) {
+                        tabs.forEachIndexed { index, tab ->
+                            val isSelected = currentTab == index
+                            NavigationBarItem(
+                                selected = isSelected,
+                                onClick = { currentTab = index },
+                                icon = { Icon(imageVector = tab.icon, contentDescription = tab.label) },
+                                label = {
+                                    Text(
+                                        text = tab.label,
+                                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                                    )
+                                },
+                                alwaysShowLabel = true,
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = TealAccent,
+                                    selectedTextColor = TealAccent,
+                                    indicatorColor = TealAccentContainer,
+                                    unselectedIconColor = TextMutedDark,
+                                    unselectedTextColor = TextMutedDark
                                 )
-                            },
-                            alwaysShowLabel = true,
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = TealAccent,
-                                selectedTextColor = TealAccent,
-                                indicatorColor = TealAccentContainer,
-                                unselectedIconColor = TextMutedDark,
-                                unselectedTextColor = TextMutedDark
                             )
-                        )
+                        }
                     }
                 }
             }
@@ -153,6 +205,7 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .consumeWindowInsets(innerPadding)
         ) {
             if (!statusBanner.isNullOrBlank()) {
                 Surface(

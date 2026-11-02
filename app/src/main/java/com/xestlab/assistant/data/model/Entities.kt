@@ -57,8 +57,9 @@ data class UserSettings(
     val quietHoursStart: String = "22:00",
     val quietHoursEnd: String = "07:00",
     val quietHoursEnabled: Boolean = true,
-    val voiceSpeed: Float = 0.9f,
-    val isFirstRunComplete: Boolean = false
+    val voiceSpeed: Float = 1.0f,
+    val isFirstRunComplete: Boolean = false,
+    val selectedVoiceName: String = ""
 )
 
 @Entity(tableName = "items")

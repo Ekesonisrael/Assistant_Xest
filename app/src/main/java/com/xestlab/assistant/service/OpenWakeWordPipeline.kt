@@ -10,6 +10,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
+import com.xestlab.assistant.data.SecurePreferences
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -19,21 +20,32 @@ import kotlinx.coroutines.withContext
 import java.nio.FloatBuffer
 import java.util.Arrays
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
+
+enum class WakeWordAudioSource(val androidSource: Int, val label: String) {
+    MIC(MediaRecorder.AudioSource.MIC, "MIC"),
+    VOICE_RECOGNITION(MediaRecorder.AudioSource.VOICE_RECOGNITION, "VOICE_RECOGNITION"),
+    UNPROCESSED(MediaRecorder.AudioSource.UNPROCESSED, "UNPROCESSED")
+}
+
+data class WakeWordLiveTelemetry(
+    val micLevel: Int,
+    val audioFramesReceived: Long,
+    val currentScore: Float,
+    val peakScore: Float,
+    val audioSourceLabel: String,
+    val isSilentFor5Seconds: Boolean
+)
 
 /**
  * Resilient 3-stage openWakeWord ONNX Runtime preprocessing & wake-word detection pipeline:
  *
- * - Runs an infinite `while (isListening)` loop inside a background Coroutine.
- * - Dynamically queries `AudioRecord.getMinBufferSize(16000, CHANNEL_IN_MONO, ENCODING_PCM_16BIT)`
- *   on every recording start.
- * - Never breaks on 0/empty/partial reads; accumulates PCM samples cleanly into 1280-sample
- *   (80ms) ONNX frames with a 480-sample STFT overlap (`[1, 1760]`).
- * - Catches and logs any `AudioRecord` or ONNX exception, releases the previous `AudioRecord`,
- *   and immediately restarts recording inside `while (isListening)` so it never stops listening.
- * - Pipeline stages:
- *   1. "melspectrogram.onnx" -> scaled via `(x / 10f) + 2f` into `[1, 76, 32, 1]`
- *   2. "embedding_model.onnx" -> 96-dim speech embedding into `[1, 16, 96]`
- *   3. "hey_jarvis_v0.1.onnx" -> probability score `[0.0, 1.0]`, triggering when `score > 0.20f`.
+ * - Tries audio sources strictly in order: `MIC` -> `VOICE_RECOGNITION` -> `UNPROCESSED`.
+ * - Computes live microphone level (0..100) and emits telemetry 5 times per second (every 200ms).
+ * - If mic level stays at 0 for 5 seconds, flags silent-mic warning and restarts AudioRecord with the next source.
+ * - Default threshold `0.35`, triggering when 2 of the last 3 ONNX scores exceed the threshold.
  */
 class OpenWakeWordPipeline(context: Context) {
 
@@ -54,7 +66,15 @@ class OpenWakeWordPipeline(context: Context) {
         const val EMBEDDING_DIM = 96
         const val DEFAULT_CLASSIFIER_FRAMES = 16
 
-        const val TRIGGER_THRESHOLD = 0.20f
+        const val TRIGGER_THRESHOLD = SecurePreferences.DEFAULT_WAKE_WORD_THRESHOLD
+        private const val TELEMETRY_INTERVAL_MS = 200L
+        private const val SILENT_MIC_TIMEOUT_MS = 5_000L
+
+        val ORDERED_AUDIO_SOURCES = listOf(
+            WakeWordAudioSource.MIC,
+            WakeWordAudioSource.VOICE_RECOGNITION,
+            WakeWordAudioSource.UNPROCESSED
+        )
     }
 
     private val appContext = context.applicationContext
@@ -77,10 +97,6 @@ class OpenWakeWordPipeline(context: Context) {
     @Volatile
     private var activeAudioRecord: AudioRecord? = null
 
-    /**
-     * Loads the 3 ONNX models ("melspectrogram.onnx", "embedding_model.onnx", "hey_jarvis_v0.1.onnx")
-     * from `app/src/main/assets/` into [OrtSession] instances if not already loaded.
-     */
     @Synchronized
     fun ensureModelsLoaded() {
         if (melSession != null && embeddingSession != null && wakeWordSession != null) {
@@ -140,25 +156,22 @@ class OpenWakeWordPipeline(context: Context) {
         }
     }
 
-    /**
-     * Runs an infinite `while (isListening)` recording & ONNX inference loop inside a Coroutine.
-     *
-     * - Reads buffer size dynamically via `AudioRecord.getMinBufferSize()`.
-     * - Never breaks on 0/empty reads (`readCount == 0` yields briefly and continues).
-     * - If any `AudioRecord` or ONNX exception occurs, catches it, logs it, releases the old
-     *   `AudioRecord`, and immediately restarts recording so wake-word listening never drops out.
-     * - Only exits when `score > 0.20f` (to hand the mic to SpeechRecognizer) or when
-     *   [stopAudioCapture] / Coroutine cancellation explicitly stops listening.
-     */
     @SuppressLint("MissingPermission")
     suspend fun runDetectionLoop(
-        triggerThreshold: Float = TRIGGER_THRESHOLD,
-        onScoreUpdate: (Float) -> Unit = {},
+        thresholdProvider: () -> Float = { TRIGGER_THRESHOLD },
+        onTelemetryUpdate: (WakeWordLiveTelemetry) -> Unit = {},
+        onSourceSwitched: (fromSource: String, toSource: String) -> Unit = { _, _ -> },
         onStreamRecovering: (Throwable) -> Unit = {},
         onDetected: (Float) -> Unit
     ) = withContext(Dispatchers.Default) {
         listeningState.set(true)
         var detectedScore: Float? = null
+
+        var preferredSourceIndex = 0
+        var totalAudioFramesReceived = 0L
+        var currentScore = 0.0f
+        var peakScore = 0.0f
+        var isSilentWarningLatched = false
 
         while (isListening && currentCoroutineContext().isActive) {
             var recorder: AudioRecord? = null
@@ -172,7 +185,6 @@ class OpenWakeWordPipeline(context: Context) {
                 val wakeSess = wakeWordSession
                     ?: throw IllegalStateException("$WAKE_WORD_MODEL_ASSET session not initialized")
 
-                // Dynamically read hardware minimum buffer size on every recording session start
                 val rawMinBufferBytes = AudioRecord.getMinBufferSize(
                     SAMPLE_RATE_HZ,
                     AudioFormat.CHANNEL_IN_MONO,
@@ -187,15 +199,19 @@ class OpenWakeWordPipeline(context: Context) {
                     )
                 }
 
-                // Allocate a generous OS ring buffer (>= 2x minBufferSize) and a dynamic short read buffer
                 val recordBufferBytes = maxOf(rawMinBufferBytes * 2, CHUNK_SAMPLES * 2 * 4)
                 val dynamicReadBufferSizeShorts = maxOf(rawMinBufferBytes / 2, CHUNK_SAMPLES)
                 val dynamicReadBuffer = ShortArray(dynamicReadBufferSizeShorts)
 
-                recorder = createInitializedAudioRecord(recordBufferBytes)
+                val (createdRecorder, selectedIndex) = createInitializedAudioRecord(
+                    bufferSizeInBytes = recordBufferBytes,
+                    startIndex = preferredSourceIndex
+                )
+                recorder = createdRecorder
+                preferredSourceIndex = selectedIndex
+                val activeSource = ORDERED_AUDIO_SOURCES[selectedIndex]
                 activeAudioRecord = recorder
 
-                // Rolling STFT & ONNX feature buffers
                 val pcmChunk = ShortArray(CHUNK_SAMPLES)
                 var pcmChunkFill = 0
                 val overlapTail = ShortArray(OVERLAP_SAMPLES)
@@ -213,43 +229,96 @@ class OpenWakeWordPipeline(context: Context) {
                 val wakeInputShape = longArrayOf(1L, seqFrames.toLong(), EMBEDDING_DIM.toLong())
 
                 var chunksProcessed = 0
+                val lastThreeScores = FloatArray(3)
+                var scoreHistoryCount = 0
 
                 recorder.startRecording()
                 if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                     throw IllegalStateException(
-                        "AudioRecord failed to enter RECORDSTATE_RECORDING (state=${recorder.recordingState})"
+                        "AudioRecord (${activeSource.label}) failed to enter RECORDSTATE_RECORDING (state=${recorder.recordingState})"
                     )
                 }
 
                 Log.i(
                     TAG,
-                    "AudioRecord infinite loop active (minBuffer=${rawMinBufferBytes}B, " +
-                        "ringBuffer=${recordBufferBytes}B, readArray=${dynamicReadBufferSizeShorts} shorts)"
+                    "AudioRecord active [source=${activeSource.label}, minBuffer=${rawMinBufferBytes}B, ringBuffer=${recordBufferBytes}B]"
                 )
 
-                // Infinite inner audio read loop — never breaks on 0/empty reads
+                var silentZeroStartMs = System.currentTimeMillis()
+                var lastTelemetryEmitMs = 0L
+                var windowSquaresSum = 0.0
+                var windowSampleCount = 0
+                var windowPeakAbs = 0
+                var rotateSourceAfterSilence = false
+
+                // Read 320 samples (20ms) per step so 200ms (5Hz) mic level updates are smooth and responsive
+                val stepReadShorts = 320.coerceAtMost(dynamicReadBuffer.size)
+
                 while (isListening && currentCoroutineContext().isActive) {
                     val shortsRead = recorder.read(
                         dynamicReadBuffer,
                         0,
-                        CHUNK_SAMPLES.coerceAtMost(dynamicReadBuffer.size)
+                        stepReadShorts
                     )
 
                     if (!isListening || !currentCoroutineContext().isActive) {
                         break
                     }
 
+                    val now = System.currentTimeMillis()
+
                     if (shortsRead == 0) {
-                        // Transient empty/null HAL read — do NOT break; yield briefly and continue listening
+                        if (silentZeroStartMs == 0L) {
+                            silentZeroStartMs = now
+                        }
+                        if (now - lastTelemetryEmitMs >= TELEMETRY_INTERVAL_MS) {
+                            lastTelemetryEmitMs = now
+                            val silentElapsed = now - silentZeroStartMs
+                            if (silentElapsed >= SILENT_MIC_TIMEOUT_MS) {
+                                isSilentWarningLatched = true
+                                rotateSourceAfterSilence = true
+                            }
+                            onTelemetryUpdate(
+                                WakeWordLiveTelemetry(
+                                    micLevel = 0,
+                                    audioFramesReceived = totalAudioFramesReceived,
+                                    currentScore = currentScore,
+                                    peakScore = peakScore,
+                                    audioSourceLabel = activeSource.label,
+                                    isSilentFor5Seconds = isSilentWarningLatched
+                                )
+                            )
+                            if (rotateSourceAfterSilence) {
+                                val nextIndex = (preferredSourceIndex + 1) % ORDERED_AUDIO_SOURCES.size
+                                val nextSource = ORDERED_AUDIO_SOURCES[nextIndex]
+                                Log.w(
+                                    TAG,
+                                    "Mic level 0 for 5s on ${activeSource.label} — rotating to ${nextSource.label}"
+                                )
+                                preferredSourceIndex = nextIndex
+                                onSourceSwitched(activeSource.label, nextSource.label)
+                                break
+                            }
+                        }
                         delay(10L)
                         continue
                     }
 
                     if (shortsRead < 0) {
                         throw IllegalStateException(
-                            "AudioRecord.read returned error code $shortsRead (recordingState=${recorder.recordingState})"
+                            "AudioRecord.read (${activeSource.label}) returned error code $shortsRead"
                         )
                     }
+
+                    for (i in 0 until shortsRead) {
+                        val s = dynamicReadBuffer[i].toInt()
+                        val absVal = abs(s)
+                        if (absVal > windowPeakAbs) {
+                            windowPeakAbs = absVal
+                        }
+                        windowSquaresSum += (s.toDouble() * s.toDouble())
+                    }
+                    windowSampleCount += shortsRead
 
                     var cursor = 0
                     while (cursor < shortsRead && isListening && currentCoroutineContext().isActive) {
@@ -261,8 +330,8 @@ class OpenWakeWordPipeline(context: Context) {
 
                         if (pcmChunkFill == CHUNK_SAMPLES) {
                             pcmChunkFill = 0
+                            totalAudioFramesReceived++
 
-                            // Assemble 1760-sample STFT window: [480 overlap] + [1280 new PCM samples]
                             for (i in 0 until OVERLAP_SAMPLES) {
                                 melAudioInput[i] = overlapTail[i].toFloat()
                             }
@@ -358,18 +427,93 @@ class OpenWakeWordPipeline(context: Context) {
                                     }
                                 }
 
-                                onScoreUpdate(score)
+                                currentScore = score
+                                if (score > peakScore) {
+                                    peakScore = score
+                                }
 
-                                if (score > triggerThreshold) {
+                                // Shift 3-score history and trigger when 2 of the last 3 scores exceed threshold
+                                lastThreeScores[0] = lastThreeScores[1]
+                                lastThreeScores[1] = lastThreeScores[2]
+                                lastThreeScores[2] = score
+                                if (scoreHistoryCount < 3) {
+                                    scoreHistoryCount++
+                                }
+
+                                val activeThreshold = thresholdProvider().coerceIn(0.05f, 0.95f)
+                                var exceedCount = 0
+                                val startIdx = 3 - scoreHistoryCount
+                                for (k in startIdx until 3) {
+                                    if (lastThreeScores[k] > activeThreshold) {
+                                        exceedCount++
+                                    }
+                                }
+
+                                if (scoreHistoryCount >= 2 && exceedCount >= 2) {
                                     Log.i(
                                         TAG,
-                                        "Wake word 'Hey Jarvis' triggered! Score=$score (> $triggerThreshold)"
+                                        "Wake word 'Hey Jarvis' triggered (2 of last 3 > $activeThreshold)! " +
+                                            "Scores=[${lastThreeScores[0]}, ${lastThreeScores[1]}, ${lastThreeScores[2]}]"
                                     )
                                     detectedScore = score
                                     listeningState.set(false)
                                     break
                                 }
                             }
+                        }
+                    }
+
+                    if (!isListening) {
+                        break
+                    }
+
+                    // Emit 5 updates per second (every 200ms)
+                    val emitNow = System.currentTimeMillis()
+                    if (emitNow - lastTelemetryEmitMs >= TELEMETRY_INTERVAL_MS) {
+                        lastTelemetryEmitMs = emitNow
+                        val micLevel = computeMicLevel0To100(
+                            squaresSum = windowSquaresSum,
+                            sampleCount = windowSampleCount,
+                            peakAbs = windowPeakAbs
+                        )
+                        windowSquaresSum = 0.0
+                        windowSampleCount = 0
+                        windowPeakAbs = 0
+
+                        if (micLevel == 0) {
+                            if (silentZeroStartMs == 0L) {
+                                silentZeroStartMs = emitNow
+                            }
+                            if (emitNow - silentZeroStartMs >= SILENT_MIC_TIMEOUT_MS) {
+                                isSilentWarningLatched = true
+                                rotateSourceAfterSilence = true
+                            }
+                        } else {
+                            silentZeroStartMs = 0L
+                            isSilentWarningLatched = false
+                        }
+
+                        onTelemetryUpdate(
+                            WakeWordLiveTelemetry(
+                                micLevel = micLevel,
+                                audioFramesReceived = totalAudioFramesReceived,
+                                currentScore = currentScore,
+                                peakScore = peakScore,
+                                audioSourceLabel = activeSource.label,
+                                isSilentFor5Seconds = isSilentWarningLatched
+                            )
+                        )
+
+                        if (rotateSourceAfterSilence) {
+                            val nextIndex = (preferredSourceIndex + 1) % ORDERED_AUDIO_SOURCES.size
+                            val nextSource = ORDERED_AUDIO_SOURCES[nextIndex]
+                            Log.w(
+                                TAG,
+                                "Mic level stayed at 0 for 5s on ${activeSource.label} — restarting with ${nextSource.label}"
+                            )
+                            preferredSourceIndex = nextIndex
+                            onSourceSwitched(activeSource.label, nextSource.label)
+                            break
                         }
                     }
                 }
@@ -379,12 +523,13 @@ class OpenWakeWordPipeline(context: Context) {
             } catch (e: Exception) {
                 Log.e(
                     TAG,
-                    "Wake word AudioRecord/ONNX exception (${e.javaClass.simpleName}: ${e.message}) — restarting recording loop immediately",
+                    "Wake word AudioRecord/ONNX exception (${e.javaClass.simpleName}: ${e.message}) — advancing source & restarting",
                     e
                 )
+                preferredSourceIndex = (preferredSourceIndex + 1) % ORDERED_AUDIO_SOURCES.size
                 onStreamRecovering(e)
                 if (isListening && currentCoroutineContext().isActive) {
-                    delay(400L)
+                    delay(350L)
                 }
             } finally {
                 if (recorder != null) {
@@ -393,48 +538,57 @@ class OpenWakeWordPipeline(context: Context) {
             }
         }
 
-        // Invoke trigger callback AFTER AudioRecord has stopped and released the mic
         val triggered = detectedScore
         if (triggered != null) {
             onDetected(triggered)
         }
     }
 
+    private fun computeMicLevel0To100(
+        squaresSum: Double,
+        sampleCount: Int,
+        peakAbs: Int
+    ): Int {
+        if (sampleCount <= 0 || peakAbs <= 2) return 0
+        val rms = sqrt(squaresSum / sampleCount.toDouble())
+        if (rms < 3.0) return 0
+        val scaled = ((rms / 4200.0) * 100.0).roundToInt()
+        return if (scaled == 0 && peakAbs > 20) 1 else scaled.coerceIn(0, 100)
+    }
+
     @SuppressLint("MissingPermission")
-    private fun createInitializedAudioRecord(bufferSizeInBytes: Int): AudioRecord {
-        val sources = intArrayOf(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            MediaRecorder.AudioSource.MIC
-        )
-        for (source in sources) {
+    private fun createInitializedAudioRecord(
+        bufferSizeInBytes: Int,
+        startIndex: Int
+    ): Pair<AudioRecord, Int> {
+        val count = ORDERED_AUDIO_SOURCES.size
+        for (offset in 0 until count) {
+            val idx = (startIndex + offset) % count
+            val sourceEntry = ORDERED_AUDIO_SOURCES[idx]
             var candidate: AudioRecord? = null
             try {
                 candidate = AudioRecord(
-                    source,
+                    sourceEntry.androidSource,
                     SAMPLE_RATE_HZ,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
                     bufferSizeInBytes
                 )
                 if (candidate.state == AudioRecord.STATE_INITIALIZED) {
-                    return candidate
+                    return candidate to idx
                 }
                 candidate.release()
             } catch (e: Exception) {
-                Log.w(TAG, "AudioRecord init failed for source=$source: ${e.message}")
+                Log.w(TAG, "AudioRecord init failed for source=${sourceEntry.label}: ${e.message}")
                 try {
                     candidate?.release()
                 } catch (_: Exception) {
                 }
             }
         }
-        throw IllegalStateException("Failed to initialize 16kHz mono 16-bit AudioRecord")
+        throw IllegalStateException("Failed to initialize 16kHz mono 16-bit AudioRecord across MIC, VOICE_RECOGNITION, UNPROCESSED")
     }
 
-    /**
-     * Immediately stops active [AudioRecord] capture so the microphone can be handed over
-     * cleanly to Android's SpeechRecognizer.
-     */
     fun stopAudioCapture() {
         listeningState.set(false)
         val recorder = activeAudioRecord

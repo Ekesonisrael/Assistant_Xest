@@ -96,6 +96,7 @@ class VoiceReminderService : Service() {
             voiceEngine.speak(
                 text = spokenScript,
                 fallbackSpeechRate = prefs.voiceSpeed,
+                isWakeUpBriefing = isWakeUp,
                 onComplete = { stopPlaybackAndFinish() }
             )
         }

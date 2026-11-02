@@ -12,19 +12,29 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -42,16 +52,21 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.xestlab.assistant.data.LlmProvider
+import com.xestlab.assistant.data.SecurePreferences
+import com.xestlab.assistant.service.WakeWordService
 import com.xestlab.assistant.ui.theme.BgDark
 import com.xestlab.assistant.ui.theme.BorderDark
 import com.xestlab.assistant.ui.theme.CardShape8
@@ -62,9 +77,13 @@ import com.xestlab.assistant.ui.theme.TextMutedDark
 import com.xestlab.assistant.ui.theme.TextPrimaryDark
 import com.xestlab.assistant.ui.theme.WarningRed
 import com.xestlab.assistant.ui.viewmodel.AssistantViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 @Composable
@@ -85,6 +104,8 @@ fun SettingsScreen(
     val isThinking by viewModel.isThinking.collectAsState()
 
     val wakeWordEnabledState by viewModel.wakeWordEnabledState.collectAsState()
+    val wakeDiagnostics by viewModel.wakeWordDiagnostics.collectAsState()
+    val wakeThresholdState by viewModel.wakeWordThreshold.collectAsState()
     val wakeWordStatusText by viewModel.wakeWordStatusText.collectAsState()
     val wakeWordStatusIsError by viewModel.wakeWordStatusIsError.collectAsState()
 
@@ -92,6 +113,11 @@ fun SettingsScreen(
     val voiceStatusText by viewModel.voiceStatusText.collectAsState()
     val voiceStatusIsError by viewModel.voiceStatusIsError.collectAsState()
     val isSpeaking by viewModel.isSpeaking.collectAsState()
+    val installedTtsVoices by viewModel.installedTtsVoices.collectAsState()
+    val selectedAndroidVoiceName by viewModel.selectedAndroidVoiceName.collectAsState()
+    val monthlyElevenLabsChars by viewModel.monthlyElevenLabsChars.collectAsState()
+    val elevenLabsPausedUntil by viewModel.elevenLabsPausedUntil.collectAsState()
+    val elevenLabsPauseMessage by viewModel.elevenLabsPauseMessage.collectAsState()
 
     LaunchedEffect(Unit) {
         viewModel.refreshSavedKeySummaries()
@@ -104,6 +130,8 @@ fun SettingsScreen(
     var quietEnabledField by remember(prefs.quietHoursEnabled) { mutableStateOf(prefs.quietHoursEnabled) }
     var voiceSpeedField by remember(prefs.voiceSpeed) { mutableFloatStateOf(prefs.voiceSpeed) }
     var autoReadField by remember(prefs.autoReadPlanOnLaunch) { mutableStateOf(prefs.autoReadPlanOnLaunch) }
+    var wakeThresholdSlider by remember(wakeThresholdState) { mutableFloatStateOf(wakeThresholdState) }
+    var voiceDropdownExpanded by remember { mutableStateOf(false) }
 
     var yearlyGoalField by remember(goals.yearlyGoal) { mutableStateOf(goals.yearlyGoal.toString()) }
     var customBriefTitle by remember { mutableStateOf("") }
@@ -200,7 +228,8 @@ fun SettingsScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(BgDark),
+            .background(BgDark)
+            .imePadding(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
@@ -216,11 +245,11 @@ fun SettingsScreen(
             )
         }
 
-        // 0. openWakeWord ONNX ("Hey Jarvis") Background Listener
+        // 0. openWakeWord ONNX ("Hey Jarvis") Listener & Live 5Hz Diagnostics
         item {
             SettingsCard(title = "WAKE WORD — 'HEY JARVIS' (OPENWAKEWORD ONNX PIPELINE)") {
                 SettingsSwitchRow(
-                    label = "Listen for 'Hey Jarvis' in Background",
+                    label = "Listen for 'Hey Jarvis' (while app visible or from tap)",
                     checked = wakeWordEnabled,
                     onCheckedChange = { wantEnabled ->
                         if (wantEnabled) {
@@ -257,10 +286,114 @@ fun SettingsScreen(
                 )
 
                 Text(
-                    text = "100% On-Device 3-Model ONNX Pipeline: melspectrogram.onnx -> embedding_model.onnx -> hey_jarvis_v0.1.onnx (triggers when score > 0.20).",
+                    text = "100% On-Device 3-Model ONNX Pipeline (MIC -> VOICE_RECOGNITION -> UNPROCESSED). Triggers when 2 of the last 3 scores exceed threshold.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextMutedDark
                 )
+
+                Text(
+                    text = "Sensitivity Threshold: ${String.format(Locale.US, "%.2f", wakeThresholdSlider)} (Default 0.35 — 2 of last 3 scores)",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TealAccent
+                )
+                Slider(
+                    value = wakeThresholdSlider,
+                    onValueChange = {
+                        wakeThresholdSlider = it
+                        viewModel.setWakeWordThreshold(it)
+                    },
+                    valueRange = 0.10f..0.80f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = TealAccent,
+                        activeTrackColor = TealAccent
+                    )
+                )
+
+                // Live 5Hz Wake-Word Diagnostics Panel
+                Surface(
+                    color = SurfaceSubtleDark,
+                    shape = CardShape8,
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (wakeDiagnostics.isMicSilentWarning || wakeWordStatusIsError) WarningRed else BorderDark
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val lastDetectionFormatted = if (wakeDiagnostics.lastDetectionTimeMillis > 0L) {
+                        SimpleDateFormat("d MMM HH:mm:ss", Locale.getDefault())
+                            .format(Date(wakeDiagnostics.lastDetectionTimeMillis))
+                    } else {
+                        "Never"
+                    }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Microphone Level (5x/sec)",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = TextMutedDark
+                            )
+                            Text(
+                                text = "${wakeDiagnostics.micLevel} / 100",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace,
+                                color = if (wakeDiagnostics.micLevel > 0) TealAccent else TextMutedDark
+                            )
+                        }
+                        LinearProgressIndicator(
+                            progress = { (wakeDiagnostics.micLevel / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp),
+                            color = TealAccent,
+                            trackColor = BorderDark
+                        )
+
+                        if (wakeDiagnostics.isMicSilentWarning) {
+                            Surface(
+                                color = BgDark,
+                                shape = CardShape8,
+                                border = BorderStroke(1.dp, WarningRed),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = WakeWordService.SILENT_MIC_WARNING_MESSAGE,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = WarningRed,
+                                    modifier = Modifier.padding(10.dp)
+                                )
+                            }
+                        }
+
+                        WakeDiagnosticRow("Audio Frames Received", wakeDiagnostics.audioFramesReceived.toString())
+                        WakeDiagnosticRow(
+                            "Current Score",
+                            String.format(Locale.US, "%.3f", wakeDiagnostics.currentScore)
+                        )
+                        WakeDiagnosticRow(
+                            "Peak Score",
+                            String.format(Locale.US, "%.3f", wakeDiagnostics.peakScore)
+                        )
+                        WakeDiagnosticRow("Last Detection Time", lastDetectionFormatted)
+                        WakeDiagnosticRow(
+                            "Service State",
+                            "${wakeDiagnostics.serviceState} [Source: ${wakeDiagnostics.audioSource}]"
+                        )
+                        WakeDiagnosticRow(
+                            label = "Last Error",
+                            value = wakeDiagnostics.lastError,
+                            isError = wakeDiagnostics.lastError != "None"
+                        )
+                    }
+                }
 
                 OutlinedButton(
                     onClick = {
@@ -495,18 +628,95 @@ fun SettingsScreen(
             }
         }
 
-        // 2. Proper Voice: ElevenLabs + Natural Android TTS Fallback (0.9x, Pitch 1.0)
+        // 2. Proper Voice: ElevenLabs (EXAVITQu4vr4xnSDxMaL) + Android TTS Fallback (1.0x, Quality Voice Picker)
         item {
-            SettingsCard(title = "VOICE ENGINE (ELEVENLABS + 0.9X NATURAL FALLBACK)") {
+            SettingsCard(title = "VOICE ENGINE (ELEVENLABS + 1.0X ANDROID FALLBACK)") {
+                val isCloudPaused = elevenLabsPausedUntil > System.currentTimeMillis() &&
+                    elevenLabsPauseMessage.isNotBlank()
+                val monthlyPercent = (monthlyElevenLabsChars * 100) / SecurePreferences.MONTHLY_ELEVENLABS_CHAR_LIMIT
+                val isMonthlyNearQuota =
+                    monthlyElevenLabsChars >= SecurePreferences.MONTHLY_ELEVENLABS_WARN_THRESHOLD
+
                 Text(
                     text = if (hasElevenSaved) {
-                        "ElevenLabs active (Voice ID: 21m00Tcm4TlvDq8ikWAM). Automatically falls back to Android TTS (0.9x) if offline or on API error."
+                        "Default ElevenLabs Voice ID: ${SecurePreferences.DEFAULT_ELEVENLABS_VOICE_ID}. Cached by text hash and used only for wake-up briefings and replies under 200 characters (longer replies use Android TTS 1.0x)."
                     } else {
-                        "Using Android TTS natural fallback (Speech rate 0.9x, Pitch 1.0). Save your ElevenLabs API key below to route all speech through ElevenLabs."
+                        "Using Android TTS fallback (Speech rate 1.0x, short sentences with pauses). Save an ElevenLabs API key below to enable cloud voice (${SecurePreferences.DEFAULT_ELEVENLABS_VOICE_ID}) for wake-up briefings and replies under 200 characters."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextMutedDark
                 )
+
+                // Single clear 24-hour pause banner on HTTP 401 or 402
+                if (isCloudPaused) {
+                    Surface(
+                        color = SurfaceSubtleDark,
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, WarningRed),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = elevenLabsPauseMessage,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = WarningRed,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
+
+                // Monthly Cloud Voice Character Counter & 80% of 10,000 Warning
+                Surface(
+                    color = SurfaceSubtleDark,
+                    shape = CardShape8,
+                    border = BorderStroke(
+                        1.dp,
+                        if (isMonthlyNearQuota) WarningRed else BorderDark
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Cloud Characters Used This Month",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = TextMutedDark
+                            )
+                            Text(
+                                text = "${String.format(Locale.US, "%,d", monthlyElevenLabsChars)} / 10,000 ($monthlyPercent%)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace,
+                                color = if (isMonthlyNearQuota) WarningRed else TealAccent
+                            )
+                        }
+                        LinearProgressIndicator(
+                            progress = {
+                                (monthlyElevenLabsChars.toFloat() / SecurePreferences.MONTHLY_ELEVENLABS_CHAR_LIMIT)
+                                    .coerceIn(0f, 1f)
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp),
+                            color = if (isMonthlyNearQuota) WarningRed else TealAccent,
+                            trackColor = BorderDark
+                        )
+                        if (isMonthlyNearQuota) {
+                            Text(
+                                text = "Warning: You have reached $monthlyPercent% of the 10,000 monthly cloud character budget (${String.format(Locale.US, "%,d", monthlyElevenLabsChars)} / 10,000).",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = WarningRed
+                            )
+                        }
+                    }
+                }
 
                 SecretKeyTextField(
                     value = elevenLabsKeyInput,
@@ -519,7 +729,7 @@ fun SettingsScreen(
                 )
 
                 Text(
-                    text = "SecurePrefs ElevenLabs Key: $savedElevenLabsSummary",
+                    text = "SecurePrefs ElevenLabs Key: $savedElevenLabsSummary (Voice ID: ${SecurePreferences.DEFAULT_ELEVENLABS_VOICE_ID})",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (hasElevenSaved) TealAccent else WarningRed
                 )
@@ -588,54 +798,137 @@ fun SettingsScreen(
                         border = BorderStroke(1.dp, BorderDark),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Clear ElevenLabs Key (Use Android TTS 0.9x)", color = WarningRed)
+                        Text("Clear ElevenLabs Key (Use Android TTS 1.0x)", color = WarningRed)
                     }
                 }
 
-                // Live diagnostic TextView showing ElevenLabs HTTP status / MediaPlayer playback or fallback error
-                Surface(
-                    color = SurfaceSubtleDark,
-                    shape = CardShape8,
-                    border = BorderStroke(
-                        width = 1.dp,
-                        color = if (voiceStatusIsError) WarningRed else BorderDark
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    val errorColorArgb = WarningRed.toArgb()
-                    val okColorArgb = TealAccent.toArgb()
-                    AndroidView(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        factory = { ctx ->
-                            TextView(ctx).apply {
-                                layoutParams = ViewGroup.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.WRAP_CONTENT
+                // Live playback diagnostic (suppressed when 24h pause banner is already displayed above)
+                if (!isCloudPaused) {
+                    Surface(
+                        color = SurfaceSubtleDark,
+                        shape = CardShape8,
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (voiceStatusIsError) WarningRed else BorderDark
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val errorColorArgb = WarningRed.toArgb()
+                        val okColorArgb = TealAccent.toArgb()
+                        AndroidView(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            factory = { ctx ->
+                                TextView(ctx).apply {
+                                    layoutParams = ViewGroup.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.WRAP_CONTENT
+                                    )
+                                    typeface = Typeface.MONOSPACE
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                                    setTextIsSelectable(true)
+                                }
+                            },
+                            update = { textView ->
+                                textView.text = voiceStatusText
+                                textView.setTextColor(
+                                    if (voiceStatusIsError) errorColorArgb else okColorArgb
                                 )
-                                typeface = Typeface.MONOSPACE
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                                setTextIsSelectable(true)
                             }
-                        },
-                        update = { textView ->
-                            textView.text = voiceStatusText
-                            textView.setTextColor(
-                                if (voiceStatusIsError) errorColorArgb else okColorArgb
-                            )
-                        }
-                    )
+                        )
+                    }
+                }
+
+                // Android Fallback Voice Picker (Installed Voices Sorted by Quality)
+                val selectedVoiceObj = installedTtsVoices.firstOrNull { it.name == selectedAndroidVoiceName }
+                val currentPickerLabel = when {
+                    selectedVoiceObj != null -> selectedVoiceObj.displayLabel
+                    selectedAndroidVoiceName.isNotBlank() -> selectedAndroidVoiceName
+                    installedTtsVoices.isNotEmpty() ->
+                        "Auto Highest Quality (${installedTtsVoices.first().displayLabel})"
+                    else -> "System Default Voice"
                 }
 
                 Text(
-                    text = "Fallback Android TTS Speed: ${String.format(Locale.US, "%.2fx", voiceSpeedField)} (Default 0.90x, Pitch 1.0)",
+                    text = "Android Fallback Voice (Sorted by Quality):",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TealAccent
+                )
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.refreshSavedKeySummaries()
+                            voiceDropdownExpanded = true
+                        },
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, TealAccent),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = currentPickerLabel,
+                            color = TextPrimaryDark,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = voiceDropdownExpanded,
+                        onDismissRequest = { voiceDropdownExpanded = false },
+                        modifier = Modifier
+                            .fillMaxWidth(0.88f)
+                            .heightIn(max = 320.dp)
+                            .background(SurfaceDark)
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "Auto (Highest Quality Installed)",
+                                    color = if (selectedAndroidVoiceName.isBlank()) TealAccent else TextPrimaryDark
+                                )
+                            },
+                            onClick = {
+                                viewModel.selectAndroidTtsVoice("")
+                                voiceDropdownExpanded = false
+                            }
+                        )
+                        installedTtsVoices.forEach { voiceInfo ->
+                            val isSelected = voiceInfo.name == selectedAndroidVoiceName
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(
+                                            text = voiceInfo.displayLabel,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = if (isSelected) TealAccent else TextPrimaryDark
+                                        )
+                                        Text(
+                                            text = "${voiceInfo.name} | Quality ${voiceInfo.quality}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = TextMutedDark
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    viewModel.selectAndroidTtsVoice(voiceInfo.name)
+                                    voiceDropdownExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = "Fallback Android TTS Speed: ${String.format(Locale.US, "%.2fx", voiceSpeedField)} (Default 1.00x, short sentences with pauses)",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextMutedDark
                 )
                 Slider(
                     value = voiceSpeedField,
                     onValueChange = { voiceSpeedField = it },
+                    onValueChangeFinished = {
+                        viewModel.setFallbackVoiceSpeed(voiceSpeedField)
+                    },
                     valueRange = 0.6f..1.4f,
                     colors = SliderDefaults.colors(
                         thumbColor = TealAccent,
@@ -965,19 +1258,52 @@ private fun SettingsCard(
 }
 
 @Composable
+private fun WakeDiagnosticRow(
+    label: String,
+    value: String,
+    isError: Boolean = false
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = TextMutedDark,
+            modifier = Modifier.padding(end = 8.dp)
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            color = if (isError) WarningRed else TextPrimaryDark
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 private fun SettingsTextField(
     value: String,
     onValueChange: (String) -> Unit,
     label: String,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val coroutineScope = rememberCoroutineScope()
+
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
+        textStyle = MaterialTheme.typography.bodyLarge.copy(color = TextPrimaryDark),
         label = { Text(label) },
         singleLine = true,
         shape = CardShape8,
         colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = SurfaceSubtleDark,
+            unfocusedContainerColor = SurfaceSubtleDark,
             focusedBorderColor = TealAccent,
             unfocusedBorderColor = BorderDark,
             focusedTextColor = TextPrimaryDark,
@@ -987,23 +1313,39 @@ private fun SettingsTextField(
             unfocusedLabelColor = TextMutedDark
         ),
         modifier = modifier
+            .bringIntoViewRequester(bringIntoViewRequester)
+            .onFocusEvent { state ->
+                if (state.isFocused) {
+                    coroutineScope.launch {
+                        delay(180)
+                        bringIntoViewRequester.bringIntoView()
+                    }
+                }
+            }
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SecretKeyTextField(
     value: String,
     onValueChange: (String) -> Unit,
     label: String
 ) {
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val coroutineScope = rememberCoroutineScope()
+
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
+        textStyle = MaterialTheme.typography.bodyLarge.copy(color = TextPrimaryDark),
         label = { Text(label) },
         visualTransformation = PasswordVisualTransformation(),
         singleLine = true,
         shape = CardShape8,
         colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = SurfaceSubtleDark,
+            unfocusedContainerColor = SurfaceSubtleDark,
             focusedBorderColor = TealAccent,
             unfocusedBorderColor = BorderDark,
             focusedTextColor = TextPrimaryDark,
@@ -1012,7 +1354,17 @@ private fun SecretKeyTextField(
             focusedLabelColor = TealAccent,
             unfocusedLabelColor = TextMutedDark
         ),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .bringIntoViewRequester(bringIntoViewRequester)
+            .onFocusEvent { state ->
+                if (state.isFocused) {
+                    coroutineScope.launch {
+                        delay(180)
+                        bringIntoViewRequester.bringIntoView()
+                    }
+                }
+            }
     )
 }
 
