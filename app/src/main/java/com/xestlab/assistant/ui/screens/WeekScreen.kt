@@ -135,7 +135,7 @@ fun WeekScreen(viewModel: AssistantViewModel) {
                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                 modifier = Modifier.weight(1f)
             ) {
-                Text("Copy Review", color = BgDark, fontWeight = FontWeight.SemiBold)
+                Text("Copy Review", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
             }
 
             OutlinedButton(

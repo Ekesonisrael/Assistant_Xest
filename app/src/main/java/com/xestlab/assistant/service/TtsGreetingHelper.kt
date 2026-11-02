@@ -51,10 +51,10 @@ object TtsGreetingHelper {
      * - 17..23: "Good evening, King Israel."
      */
     fun getTimeAwareGreeting(
-        userName: String = "King Israel",
+        userName: String = "Israel",
         hourOfDay: Int = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
     ): String {
-        val displayName = userName.trim().ifBlank { "King Israel" }
+        val displayName = userName.trim().ifBlank { "Israel" }
         val greetingWord = getGreetingWord(hourOfDay)
         return "$greetingWord, $displayName."
     }
@@ -104,14 +104,15 @@ object TtsGreetingHelper {
      */
     suspend fun buildDynamicBriefing(
         db: AppDatabase,
-        userName: String = "King Israel",
-        briefingTitle: String? = null
+        userName: String = "Israel",
+        briefingTitle: String? = null,
+        includeGreeting: Boolean = true
     ): String {
         val nowMillis = System.currentTimeMillis()
         val hourOfDay = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
         val isEveningReview = (briefingTitle?.contains("evening", ignoreCase = true) == true) || hourOfDay >= 18
 
-        val greeting = getTimeAwareGreeting(userName, hourOfDay)
+        val greetingPrefix = if (includeGreeting) "${getTimeAwareGreeting(userName, hourOfDay)} " else ""
         val remainingTitles = getRemainingTaskTitlesForToday(db)
         val remainingCount = remainingTitles.size
 
@@ -189,15 +190,15 @@ object TtsGreetingHelper {
             val firstTask = remainingTitles.first()
             val taskNoun = if (remainingCount == 1) "task" else "tasks"
             if (extraSegments.isNotBlank()) {
-                "$greeting You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. $extraSegments What do you want to do first?"
+                "${greetingPrefix}You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. $extraSegments What do you want to do first?"
             } else {
-                "$greeting You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. What do you want to do first?"
+                "${greetingPrefix}You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. What do you want to do first?"
             }
         } else {
             if (extraSegments.isNotBlank()) {
-                "$greeting You have cleared all your tasks for today. Excellent work. $extraSegments You should rest."
+                "${greetingPrefix}You have cleared all your tasks for today. Excellent work. $extraSegments You should rest."
             } else {
-                "$greeting You have cleared all your tasks for today. Excellent work. You should rest."
+                "${greetingPrefix}You have cleared all your tasks for today. Excellent work. You should rest."
             }
         }
     }

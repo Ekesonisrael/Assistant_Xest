@@ -33,11 +33,11 @@ val XestlabTextSelectionColors = TextSelectionColors(
 
 private val XestlabDarkColorScheme = darkColorScheme(
     primary = TealAccent,
-    onPrimary = Color(0xFF061A18),
+    onPrimary = Color.White,
     primaryContainer = TealAccentContainer,
     onPrimaryContainer = TextPrimaryDark,
     secondary = TealAccent,
-    onSecondary = Color(0xFF061A18),
+    onSecondary = Color.White,
     secondaryContainer = SurfaceSubtleDark,
     onSecondaryContainer = TextPrimaryDark,
     background = BgDark,

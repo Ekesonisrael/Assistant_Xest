@@ -166,7 +166,7 @@ fun NotesScreen(viewModel: AssistantViewModel) {
                     colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
                 ) {
-                    Text("Save", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    Text("Save", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                 }
             }
         }

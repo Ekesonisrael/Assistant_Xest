@@ -251,34 +251,80 @@ object AssistantParser {
             }
         }
 
-        // 9. Explicit Task command ("add task ...", "task: ...", "schedule ...")
-        val explicitTaskStarters = listOf("add task ", "task:", "todo:", "schedule ")
-        if (!cleaned.endsWith("?") && explicitTaskStarters.any { lower.startsWith(it) }) {
-            val extractedDue = extractTimeMillis(cleaned, nowMillis)
-            val durationMins = extractDurationMinutes(cleaned)
-            val priority = when {
-                lower.contains("urgent") || lower.contains("asap") || lower.contains("important") || lower.contains("high priority") -> "HIGH"
-                lower.contains("low priority") -> "LOW"
-                else -> "NORMAL"
-            }
-            val cleanedTitle = cleaned
-                .replace(Regex("^(?:add\\s+task|task:|todo:|schedule)\\s+", RegexOption.IGNORE_CASE), "")
-                .let { stripTimePhrases(it) }
-                .trim()
-                .ifBlank { cleaned }
-                .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
+        // 9. Explicit Task command ("add a task: ...", "add task ...", "create a task ...", "task: ...", "todo: ...", "schedule ...")
+        val explicitTaskRegex = Regex(
+            "^(?:(?:please|can\\s+you|could\\s+you|coach)\\s+)?(?:(?:add|create|make|save|put)\\s+(?:a\\s+|new\\s+)?task(?:\\s+to)?|new\\s+task|task\\s*[:\\-]|to-?do\\s*[:\\-]|schedule)(?:\\s*[:\\-]\\s*|\\s+)(.+)$",
+            RegexOption.IGNORE_CASE
+        )
+        explicitTaskRegex.find(cleaned)?.let { match ->
+            val rawBody = match.groupValues[1].trim().trimEnd('?')
+            val isQuestionAboutSchedule = lower.startsWith("schedule") && cleaned.endsWith("?")
+            if (rawBody.isNotBlank() && !isQuestionAboutSchedule) {
+                val extractedDue = extractTimeMillis(rawBody, nowMillis)
+                val durationMins = extractDurationMinutes(rawBody)
+                val priority = when {
+                    lower.contains("urgent") || lower.contains("asap") || lower.contains("important") || lower.contains("high priority") -> "HIGH"
+                    lower.contains("low priority") -> "LOW"
+                    else -> "NORMAL"
+                }
+                val cleanedTitle = stripTimePhrases(rawBody)
+                    .trim()
+                    .removePrefix(":")
+                    .removePrefix("-")
+                    .trim()
+                    .ifBlank { rawBody }
+                    .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
 
-            return ParsedIntent.Task(
-                title = cleanedTitle,
-                dueAt = extractedDue,
-                durationMinutes = durationMins,
-                priority = priority,
-                sourceText = cleaned
-            )
+                return ParsedIntent.Task(
+                    title = cleanedTitle,
+                    dueAt = extractedDue,
+                    durationMinutes = durationMins,
+                    priority = priority,
+                    sourceText = cleaned
+                )
+            }
         }
 
         // 10. All other questions & chat go to ChatOrQuestion (NEVER saved as Notes)
         return ParsedIntent.ChatOrQuestion(query = cleaned)
+    }
+
+    fun isWhatsOnMyListQuery(rawInput: String): Boolean {
+        val lower = rawInput.trim().lowercase(Locale.getDefault()).trimEnd('?', '.', '!')
+        return lower == "what's on my list" ||
+            lower == "whats on my list" ||
+            lower == "what is on my list" ||
+            lower == "what's on my plan" ||
+            lower == "whats on my plan" ||
+            lower == "what's pending" ||
+            lower == "whats pending" ||
+            lower == "what is pending" ||
+            lower == "what tasks do i have" ||
+            lower == "what tasks are left" ||
+            lower == "what do i have left" ||
+            lower == "what's left today" ||
+            lower == "whats left today" ||
+            lower == "show my list" ||
+            lower == "show my tasks" ||
+            lower == "list my tasks"
+    }
+
+    fun isStopQuestionsPhrase(rawInput: String): Boolean {
+        val lower = rawInput.trim().lowercase(Locale.getDefault()).trimEnd('.', '!', '?')
+        val stopPhrases = listOf(
+            "that's all",
+            "thats all",
+            "no more",
+            "let me rest",
+            "i want to rest",
+            "let me sleep",
+            "nothing else",
+            "stop asking",
+            "no more questions",
+            "that will be all",
+            "that is all"
+        )
+        return stopPhrases.any { lower == it || lower.startsWith("$it,") || lower.startsWith("$it ") || lower.endsWith(" $it") }
     }
 
     fun extractTimeMillis(input: String, nowMillis: Long = System.currentTimeMillis()): Long? {

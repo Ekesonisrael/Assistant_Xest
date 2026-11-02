@@ -365,7 +365,7 @@ fun SetupScreen(
             Text(
                 text = if (isReopenedFromSettings) "Save & Return" else "Save Profile & Open Assistant",
                 fontWeight = FontWeight.SemiBold,
-                color = BgDark
+                color = TextPrimaryDark
             )
         }
 

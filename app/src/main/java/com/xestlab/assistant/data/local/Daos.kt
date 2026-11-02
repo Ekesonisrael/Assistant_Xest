@@ -196,16 +196,16 @@ interface FactDao {
 
 @Dao
 interface ConversationDao {
-    @Query("SELECT * FROM conversation_turns ORDER BY timestamp DESC LIMIT 50")
+    @Query("SELECT * FROM conversation_turns ORDER BY timestamp DESC, id DESC LIMIT 50")
     fun observeTurns(): Flow<List<ConversationTurn>>
 
-    @Query("SELECT * FROM conversation_turns ORDER BY timestamp DESC LIMIT :limit")
+    @Query("SELECT * FROM conversation_turns ORDER BY timestamp DESC, id DESC LIMIT :limit")
     suspend fun getLastTurnsDirect(limit: Int): List<ConversationTurn>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTurn(turn: ConversationTurn)
 
-    @Query("DELETE FROM conversation_turns WHERE id NOT IN (SELECT id FROM conversation_turns ORDER BY timestamp DESC LIMIT 50)")
+    @Query("DELETE FROM conversation_turns WHERE id NOT IN (SELECT id FROM conversation_turns ORDER BY timestamp DESC, id DESC LIMIT 50)")
     suspend fun trimToLastFifty()
 
     @Query("DELETE FROM conversation_turns")

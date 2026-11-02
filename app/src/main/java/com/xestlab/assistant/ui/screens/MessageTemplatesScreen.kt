@@ -264,7 +264,7 @@ private fun MessageTemplateEditorCard(
                 ) {
                     Text(
                         text = if (isModified) "Save Template" else "Saved ✓",
-                        color = BgDark,
+                        color = TextPrimaryDark,
                         fontWeight = FontWeight.SemiBold
                     )
                 }

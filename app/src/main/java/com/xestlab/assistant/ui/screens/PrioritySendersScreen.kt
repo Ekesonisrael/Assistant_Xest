@@ -218,7 +218,7 @@ fun PrioritySendersScreen(
                                     colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                                     modifier = Modifier.weight(1f)
                                 ) {
-                                    Text(level, color = BgDark, fontWeight = FontWeight.SemiBold)
+                                    Text(level, color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                                 }
                             } else {
                                 OutlinedButton(
@@ -256,7 +256,7 @@ fun PrioritySendersScreen(
                         ) {
                             Text(
                                 text = if (editingSenderKey != null) "Update Sender" else "Save Sender Rule",
-                                color = BgDark,
+                                color = TextPrimaryDark,
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
@@ -498,7 +498,7 @@ private fun SenderRuleRowCard(
                             Text(
                                 text = "$level ✓",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = BgDark,
+                                color = TextPrimaryDark,
                                 fontWeight = FontWeight.SemiBold
                             )
                         }

@@ -181,15 +181,27 @@ fun HomeScreen(viewModel: AssistantViewModel) {
 
         if (conversationTurns.isNotEmpty() && (isKeyboardOpen || didJustSend || hasNewTurn)) {
             kotlinx.coroutines.delay(60L)
+            val hasVisibleEmails = unreadEmails.any { !it.dismissedInApp }
+            val hasNextUpItem = pendingItems.any {
+                !it.sourceText.startsWith("web_pipeline_") &&
+                    !it.sourceText.startsWith("lead_followup:")
+            }
+            val conversationHeaderIndex = 3 +
+                (if (pendingConfirmation != null) 1 else 0) +
+                1 +
+                (if (hasVisibleEmails) 1 else 0) +
+                (if (activeProposal != null) 1 else 0) +
+                (if (dueFollowUpsToday.isNotEmpty()) (1 + dueFollowUpsToday.size) else 0) +
+                (if (hasNextUpItem) 1 else 0)
             val totalItems = listState.layoutInfo.totalItemsCount
             if (totalItems > 0) {
-                listState.animateScrollToItem(totalItems - 1)
+                listState.animateScrollToItem(conversationHeaderIndex.coerceIn(0, totalItems - 1))
             }
             if (isKeyboardOpen) {
                 kotlinx.coroutines.delay(160L)
                 val settledTotal = listState.layoutInfo.totalItemsCount
                 if (settledTotal > 0) {
-                    listState.animateScrollToItem(settledTotal - 1)
+                    listState.animateScrollToItem(conversationHeaderIndex.coerceIn(0, settledTotal - 1))
                 }
             }
         }
@@ -542,7 +554,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
 
                         Text(
                             text = dailyPlanSummary.ifBlank {
-                                "Good morning $displayName, how are you doing? Tap Read Daily Plan to hear your priorities."
+                                "Tap Read Daily Plan to hear today's priorities."
                             },
                             style = MaterialTheme.typography.bodyLarge
                         )
@@ -559,7 +571,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                             ) {
                                 Text(
                                     text = if (isSpeaking) "Restart Plan Readout" else "Read Daily Plan",
-                                    color = BgDark,
+                                    color = TextPrimaryDark,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
@@ -770,9 +782,9 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 }
             }
 
-            // 7. Coach Conversation Feed
+            // 7. Coach Conversation Feed (Newest First)
             if (conversationTurns.isNotEmpty()) {
-                item {
+                item(key = "coach_conversation_header") {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -791,7 +803,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                         )
                     }
                 }
-                items(conversationTurns.take(12).reversed(), key = { it.id }) { turn ->
+                items(conversationTurns.take(24), key = { it.id }) { turn ->
                     ConversationTurnBubble(
                         turn = turn,
                         onSpeakAgain = { viewModel.speakText(turn.text) }
@@ -861,7 +873,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                     colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
                 ) {
-                    Text("Send", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    Text("Send", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -1188,7 +1200,7 @@ private fun RankedUnreadEmailCard(
                     Text(
                         text = if (email.addedToTasks) "Added to Tasks ✓" else "Add to Tasks",
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (email.addedToTasks) TextMutedDark else BgDark,
+                        color = if (email.addedToTasks) TextMutedDark else TextPrimaryDark,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
@@ -1299,7 +1311,7 @@ private fun PendingActionConfirmationCard(
                     shape = CardShape8,
                     colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                 ) {
-                    Text("Confirm", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    Text("Confirm", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                 }
                 if (pending is PendingConfirmation.LogPayment && pending.canMarkWon) {
                     Button(
@@ -1309,7 +1321,7 @@ private fun PendingActionConfirmationCard(
                     ) {
                         Text(
                             "Confirm & Mark ${pending.matchedLeadName ?: "Lead"} Won",
-                            color = BgDark,
+                            color = TextPrimaryDark,
                             fontWeight = FontWeight.SemiBold
                         )
                     }
@@ -1385,7 +1397,7 @@ private fun AddLeadFromEmailDialog(
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
                                 modifier = Modifier.weight(1f)
                             ) {
-                                Text(svc, color = BgDark, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text(svc, color = TextPrimaryDark, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                             }
                         } else {
                             OutlinedButton(
@@ -1450,7 +1462,7 @@ private fun AddLeadFromEmailDialog(
                 shape = CardShape8,
                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
             ) {
-                Text("Add Lead", color = BgDark, fontWeight = FontWeight.SemiBold)
+                Text("Add Lead", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = {
@@ -1520,7 +1532,7 @@ private fun EmailTagDialog(
                                 Text(
                                     text = "$tag ✓",
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = BgDark,
+                                    color = TextPrimaryDark,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
@@ -1575,7 +1587,7 @@ private fun EmailTagDialog(
                         shape = CardShape8,
                         colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                     ) {
-                        Text("Add", color = BgDark, fontWeight = FontWeight.SemiBold)
+                        Text("Add", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -1624,7 +1636,7 @@ private fun ProposalDecisionCard(
                     shape = CardShape8,
                     colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                 ) {
-                    Text("Accept Slot", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    Text("Accept Slot", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                 }
                 OutlinedButton(
                     onClick = onDrop,

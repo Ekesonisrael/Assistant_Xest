@@ -263,7 +263,7 @@ fun PlanScreen(viewModel: AssistantViewModel) {
                                 shape = CardShape8,
                                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                             ) {
-                                Text("+ Log Payment", color = BgDark, fontWeight = FontWeight.SemiBold)
+                                Text("+ Log Payment", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
@@ -351,7 +351,7 @@ private fun ChecklistRowCard(
                     colors = CheckboxDefaults.colors(
                         checkedColor = TealAccent,
                         uncheckedColor = TextMutedDark,
-                        checkmarkColor = BgDark
+                        checkmarkColor = TextPrimaryDark
                     )
                 )
                 Column(modifier = Modifier.weight(1f)) {
@@ -409,7 +409,7 @@ private fun ChecklistRowCard(
                         shape = CardShape8,
                         colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                     ) {
-                        Text("Log", color = BgDark, fontWeight = FontWeight.SemiBold)
+                        Text("Log", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -455,7 +455,30 @@ private fun TaskPlanCard(
                     )
                 }
             }
-            Text(text = item.title, style = MaterialTheme.typography.titleMedium)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = item.isCompleted,
+                    onCheckedChange = { checked ->
+                        if (checked && !item.isCompleted) {
+                            onComplete()
+                        }
+                    },
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = TealAccent,
+                        uncheckedColor = TextMutedDark,
+                        checkmarkColor = TextPrimaryDark
+                    )
+                )
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = if (item.isCompleted) TealAccent else TextPrimaryDark,
+                    modifier = Modifier.weight(1f)
+                )
+            }
             if (item.details.isNotBlank()) {
                 Text(text = item.details, style = MaterialTheme.typography.bodyMedium, color = TextMutedDark)
             }
@@ -904,7 +927,7 @@ private fun AddOrEditPaymentDialog(
                                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
                                 modifier = Modifier.weight(1f)
                             ) {
-                                Text(shortTitle, color = BgDark, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+                                Text(shortTitle, color = TextPrimaryDark, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
                             }
                         } else {
                             OutlinedButton(
@@ -952,7 +975,7 @@ private fun AddOrEditPaymentDialog(
                             colors = CheckboxDefaults.colors(
                                 checkedColor = TealAccent,
                                 uncheckedColor = TextMutedDark,
-                                checkmarkColor = BgDark
+                                checkmarkColor = TextPrimaryDark
                             )
                         )
                         Text(
@@ -988,7 +1011,7 @@ private fun AddOrEditPaymentDialog(
                 shape = CardShape8,
                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
             ) {
-                Text("Save", color = BgDark, fontWeight = FontWeight.SemiBold)
+                Text("Save", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = {

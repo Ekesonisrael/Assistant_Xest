@@ -74,6 +74,84 @@ class AssistantRepository(
 
     suspend fun saveItem(item: Item): Long = db.itemDao().insertItem(item)
 
+    /**
+     * Writes a task directly into the Room `items` table that PlanScreen reads (`pendingItems`),
+     * verifies the row actually exists with `getItemById`, schedules any due reminder,
+     * and returns `Result.success(verified)` or `Result.failure(...)` if anything fails.
+     */
+    suspend fun createTaskVerified(
+        context: Context,
+        title: String,
+        details: String = "",
+        dueAt: Long? = null,
+        durationMinutes: Int = 30,
+        priority: String = "NORMAL",
+        type: String = "TASK",
+        sourceText: String = "coach_create_task"
+    ): Result<Item> {
+        val result = persistAndVerifyTaskInDao(
+            itemDao = db.itemDao(),
+            title = title,
+            details = details,
+            dueAt = dueAt,
+            durationMinutes = durationMinutes,
+            priority = priority,
+            type = type,
+            sourceText = sourceText
+        )
+        result.getOrNull()?.let { verified ->
+            if (verified.dueAt != null) {
+                AlarmScheduler.scheduleItemReminder(context, verified)
+            }
+        }
+        return result
+    }
+
+    companion object {
+        suspend fun persistAndVerifyTaskInDao(
+            itemDao: com.xestlab.assistant.data.local.ItemDao,
+            title: String,
+            details: String = "",
+            dueAt: Long? = null,
+            durationMinutes: Int = 30,
+            priority: String = "NORMAL",
+            type: String = "TASK",
+            sourceText: String = "coach_create_task"
+        ): Result<Item> {
+            val cleanTitle = title.trim()
+            if (cleanTitle.isBlank()) {
+                return Result.failure(IllegalArgumentException("Task title cannot be empty."))
+            }
+            return try {
+                val normalizedPriority = when (priority.trim().uppercase(Locale.US)) {
+                    "HIGH", "LOW", "NORMAL" -> priority.trim().uppercase(Locale.US)
+                    else -> "NORMAL"
+                }
+                val itemToSave = Item(
+                    type = type,
+                    title = cleanTitle,
+                    details = details.trim(),
+                    dueAt = dueAt,
+                    durationMinutes = durationMinutes.coerceAtLeast(0),
+                    priority = normalizedPriority,
+                    status = "PENDING",
+                    sourceText = sourceText
+                )
+                val insertedId = itemDao.insertItem(itemToSave)
+                if (insertedId <= 0L) {
+                    return Result.failure(IllegalStateException("Database returned invalid task ID ($insertedId)."))
+                }
+                val verified = itemDao.getItemById(insertedId)
+                if (verified == null || verified.id != insertedId || verified.status != "PENDING") {
+                    return Result.failure(IllegalStateException("Saved task could not be verified in storage."))
+                }
+                Result.success(verified)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
     suspend fun updateItemStatus(id: Long, status: String) =
         db.itemDao().updateStatus(id, status)
 
@@ -630,11 +708,21 @@ class AssistantRepository(
 
     suspend fun buildSpokenDailyPlan(
         overrideGreetingPrefix: String? = null,
-        isWakeUpAlarm: Boolean = false
+        isWakeUpAlarm: Boolean = false,
+        includeGreeting: Boolean = true
     ): String {
         val prefs = userPreferences.getSnapshot()
-        val displayName = prefs.userName.ifBlank { "King Israel" }
-        return TtsGreetingHelper.buildDynamicBriefing(db, displayName)
+        val displayName = prefs.userName.ifBlank { "Israel" }
+        val body = TtsGreetingHelper.buildDynamicBriefing(
+            db = db,
+            userName = displayName,
+            includeGreeting = if (!overrideGreetingPrefix.isNullOrBlank()) false else includeGreeting
+        )
+        return if (!overrideGreetingPrefix.isNullOrBlank()) {
+            "${overrideGreetingPrefix.trim()} $body".trim()
+        } else {
+            body
+        }
     }
 
     suspend fun exportJson(): String {

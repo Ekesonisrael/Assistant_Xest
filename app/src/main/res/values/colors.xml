@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg_dark">#FF0E1412</color>
-    <color name="surface_dark">#FF161F1C</color>
-    <color name="teal_accent">#FF2BA5A0</color>
-    <color name="ic_launcher_background">#FF0E1412</color>
+    <color name="bg_dark">#FF050507</color>
+    <color name="surface_dark">#FF0E0E12</color>
+    <color name="teal_accent">#FF7B2FF7</color>
+    <color name="ic_launcher_background">#FF050507</color>
 </resources>

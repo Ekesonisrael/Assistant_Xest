@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
@@ -89,6 +90,43 @@ class SecurePreferences(context: Context) {
                 .removePrefix("bearer ")
                 .trim()
                 .replace(Regex("\\s+"), "")
+        }
+
+        fun dayPeriodForHour(hourOfDay: Int): String {
+            return when (hourOfDay) {
+                in 0..11 -> "MORNING"
+                in 12..16 -> "AFTERNOON"
+                else -> "EVENING"
+            }
+        }
+
+        fun formatPeriodGreeting(period: String, userName: String): String {
+            val cleanName = userName.trim().ifBlank { "Israel" }
+            val prefix = when (period) {
+                "MORNING" -> "Good morning"
+                "AFTERNOON" -> "Good afternoon"
+                else -> "Good evening"
+            }
+            return "$prefix, $cleanName."
+        }
+
+        /**
+         * Pure deterministic period-greeting evaluator:
+         * Returns Triple(greetingToPrependOrEmpty, updatedLastDate, updatedLastPeriod).
+         */
+        fun evaluatePeriodGreeting(
+            lastDate: String,
+            lastPeriod: String,
+            currentDate: String,
+            currentHourOfDay: Int,
+            userName: String
+        ): Triple<String, String, String> {
+            val currentPeriod = dayPeriodForHour(currentHourOfDay)
+            return if (lastDate == currentDate && lastPeriod == currentPeriod) {
+                Triple("", lastDate, lastPeriod)
+            } else {
+                Triple(formatPeriodGreeting(currentPeriod, userName), currentDate, currentPeriod)
+            }
         }
     }
 
@@ -383,4 +421,69 @@ class SecurePreferences(context: Context) {
             "${key.take(4)}...${key.takeLast(4)} (${key.length} chars)"
         }
     }
+
+    // --- Deterministic Time-of-Day Greeting & Daily Briefing Tracking ---
+
+    private fun currentCalendarDateKey(nowMillis: Long = System.currentTimeMillis()): String {
+        return SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(nowMillis))
+    }
+
+    var lastGreetingDate: String
+        get() = prefs.getString("last_greeting_date_v1", "") ?: ""
+        set(value) {
+            prefs.edit().putString("last_greeting_date_v1", value).commit()
+        }
+
+    var lastGreetingPeriod: String
+        get() = prefs.getString("last_greeting_period_v1", "") ?: ""
+        set(value) {
+            prefs.edit().putString("last_greeting_period_v1", value).commit()
+        }
+
+    var lastBriefingDate: String
+        get() = prefs.getString("last_briefing_date_v1", "") ?: ""
+        set(value) {
+            prefs.edit().putString("last_briefing_date_v1", value).commit()
+        }
+
+    /**
+     * Greets at most once in the morning (00-11), once in the afternoon (12-16),
+     * and once in the evening (17-23) per calendar date. Returns "" on all subsequent calls
+     * within the same period.
+     */
+    fun consumePeriodGreetingIfNeeded(
+        userName: String,
+        nowMillis: Long = System.currentTimeMillis()
+    ): String {
+        synchronized(LOCK) {
+            val cal = Calendar.getInstance().apply { timeInMillis = nowMillis }
+            val today = currentCalendarDateKey(nowMillis)
+            val hour = cal.get(Calendar.HOUR_OF_DAY)
+            val (greeting, newDate, newPeriod) = evaluatePeriodGreeting(
+                lastDate = lastGreetingDate,
+                lastPeriod = lastGreetingPeriod,
+                currentDate = today,
+                currentHourOfDay = hour,
+                userName = userName
+            )
+            if (greeting.isNotEmpty()) {
+                prefs.edit()
+                    .putString("last_greeting_date_v1", newDate)
+                    .putString("last_greeting_period_v1", newPeriod)
+                    .commit()
+            }
+            return greeting
+        }
+    }
+
+    fun shouldShowAutoBriefingToday(nowMillis: Long = System.currentTimeMillis()): Boolean {
+        val today = currentCalendarDateKey(nowMillis)
+        return lastBriefingDate != today
+    }
+
+    fun markBriefingShownToday(nowMillis: Long = System.currentTimeMillis()) {
+        val today = currentCalendarDateKey(nowMillis)
+        prefs.edit().putString("last_briefing_date_v1", today).commit()
+    }
 }
+

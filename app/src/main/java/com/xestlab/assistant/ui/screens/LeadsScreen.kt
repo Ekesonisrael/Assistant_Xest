@@ -191,7 +191,7 @@ fun LeadsScreen(viewModel: AssistantViewModel) {
                     shape = CardShape8,
                     colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                 ) {
-                    Text("+ Add Lead", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    Text("+ Add Lead", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -520,7 +520,7 @@ internal fun DueFollowUpActionCard(
                     Text(
                         text = "Open WhatsApp with draft",
                         style = MaterialTheme.typography.labelMedium,
-                        color = BgDark,
+                        color = TextPrimaryDark,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
@@ -672,7 +672,7 @@ private fun LeadSummaryCard(
                         Text(
                             "Mark Contacted (Start Cadence)",
                             style = MaterialTheme.typography.labelMedium,
-                            color = BgDark,
+                            color = TextPrimaryDark,
                             fontWeight = FontWeight.SemiBold
                         )
                     }
@@ -868,7 +868,7 @@ private fun LeadDetailContent(
                                 shape = CardShape8,
                                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                             ) {
-                                Text("Mark Contacted", color = BgDark, fontWeight = FontWeight.SemiBold)
+                                Text("Mark Contacted", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                             }
                             OutlinedButton(
                                 onClick = { viewModel.markLeadReplied(lead.id) },
@@ -882,7 +882,7 @@ private fun LeadDetailContent(
                                 shape = CardShape8,
                                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                             ) {
-                                Text("Log Quote Amount", color = BgDark, fontWeight = FontWeight.SemiBold)
+                                Text("Log Quote Amount", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                             }
                             OutlinedButton(
                                 onClick = { viewModel.markLeadWon(lead.id) },
@@ -978,7 +978,7 @@ private fun LeadDetailContent(
                             ) {
                                 Text(
                                     "Open WhatsApp with draft",
-                                    color = BgDark,
+                                    color = TextPrimaryDark,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
@@ -1038,7 +1038,7 @@ private fun LeadDetailContent(
                                         colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                                         modifier = Modifier.weight(1f)
                                     ) {
-                                        Text(svc, color = BgDark, fontWeight = FontWeight.SemiBold)
+                                        Text(svc, color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                                     }
                                 } else {
                                     OutlinedButton(
@@ -1117,7 +1117,7 @@ private fun LeadDetailContent(
                                 shape = CardShape8,
                                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                             ) {
-                                Text("Save Details", color = BgDark, fontWeight = FontWeight.SemiBold)
+                                Text("Save Details", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
@@ -1162,7 +1162,7 @@ private fun LeadDetailContent(
                                 shape = CardShape8,
                                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                             ) {
-                                Text("Log", color = BgDark, fontWeight = FontWeight.SemiBold)
+                                Text("Log", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                             }
                         }
 
@@ -1273,7 +1273,7 @@ internal fun ObservationPromptDialog(
                 shape = CardShape8,
                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
             ) {
-                Text("Save & Open WhatsApp", color = BgDark, fontWeight = FontWeight.SemiBold)
+                Text("Save & Open WhatsApp", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = {
@@ -1352,7 +1352,7 @@ private fun LogQuoteAmountDialog(
                 shape = CardShape8,
                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
             ) {
-                Text("Save Quote", color = BgDark, fontWeight = FontWeight.SemiBold)
+                Text("Save Quote", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = {
@@ -1432,7 +1432,7 @@ private fun AddLeadDialog(
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
                                 modifier = Modifier.weight(1f)
                             ) {
-                                Text(svc, color = BgDark, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text(svc, color = TextPrimaryDark, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                             }
                         } else {
                             OutlinedButton(
@@ -1541,7 +1541,7 @@ private fun AddLeadDialog(
                         colors = CheckboxDefaults.colors(
                             checkedColor = TealAccent,
                             uncheckedColor = TextMutedDark,
-                            checkmarkColor = BgDark
+                            checkmarkColor = TextPrimaryDark
                         )
                     )
                     Text(
@@ -1572,7 +1572,7 @@ private fun AddLeadDialog(
                 shape = CardShape8,
                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
             ) {
-                Text("Save Lead", color = BgDark, fontWeight = FontWeight.SemiBold)
+                Text("Save Lead", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = {

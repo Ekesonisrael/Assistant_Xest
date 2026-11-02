@@ -780,7 +780,7 @@ fun SettingsScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Groq (Active)", color = BgDark, fontWeight = FontWeight.SemiBold)
+                        Text("Groq (Active)", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                     }
 
                     // Gemini kept in UI as disabled until cloud permission issues are resolved
@@ -877,7 +877,7 @@ fun SettingsScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Save Encrypted", color = BgDark, fontWeight = FontWeight.SemiBold)
+                        Text("Save Encrypted", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                     }
                 }
 
@@ -1077,7 +1077,7 @@ fun SettingsScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Save Voice Key", color = BgDark, fontWeight = FontWeight.SemiBold)
+                        Text("Save Voice Key", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                     }
                 }
 
@@ -1310,7 +1310,7 @@ fun SettingsScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Save IMAP", color = BgDark, fontWeight = FontWeight.SemiBold)
+                        Text("Save IMAP", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                     }
                 }
 
@@ -1392,7 +1392,7 @@ fun SettingsScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Save Profile & Wake-Up Alarm", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    Text("Save Profile & Wake-Up Alarm", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -1417,7 +1417,7 @@ fun SettingsScreen(
                         Switch(
                             checked = schedule.isActive,
                             onCheckedChange = { active -> viewModel.toggleReminderSchedule(schedule, active) },
-                            colors = SwitchDefaults.colors(checkedThumbColor = BgDark, checkedTrackColor = TealAccent)
+                            colors = SwitchDefaults.colors(checkedThumbColor = TextPrimaryDark, checkedTrackColor = TealAccent)
                         )
                         if (!schedule.isBuiltIn) {
                             OutlinedButton(
@@ -1585,7 +1585,7 @@ fun SettingsScreen(
                 ) {
                     Text(
                         "Save 10M Goal & Service Prices",
-                        color = BgDark,
+                        color = TextPrimaryDark,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
@@ -1754,7 +1754,7 @@ private fun SettingsSwitchRow(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(checkedThumbColor = BgDark, checkedTrackColor = TealAccent)
+            colors = SwitchDefaults.colors(checkedThumbColor = TextPrimaryDark, checkedTrackColor = TealAccent)
         )
     }
 }
@@ -1820,7 +1820,7 @@ private fun HealthCheckRow(
                     Text(
                         text = fixLabel,
                         style = MaterialTheme.typography.labelMedium,
-                        color = BgDark,
+                        color = TextPrimaryDark,
                         fontWeight = FontWeight.SemiBold
                     )
                 }

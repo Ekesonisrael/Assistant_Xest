@@ -5,6 +5,7 @@ import com.xestlab.assistant.data.LlmProvider
 import com.xestlab.assistant.data.SecurePreferences
 import com.xestlab.assistant.data.UserPreferencesState
 import com.xestlab.assistant.data.local.AppDatabase
+import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.Lead
 import com.xestlab.assistant.data.model.tagsList
 import com.xestlab.assistant.service.EmailClassificationDecision
@@ -68,7 +69,14 @@ object AiClient {
     // const val GEMINI_MODEL = "gemini-1.5-flash-latest"
 
     const val SYSTEM_COACH_PROMPT =
-        "You are Xestlab Assistant, a sharp business coach for King Israel. You have been provided with a summary of his unread emails. Read the summary carefully. If he asks 'do I have any meetings tomorrow?', scan the email subjects for keywords like 'meeting', 'invite', or specific dates. Answer his question directly. If you don't see a meeting, explicitly say 'I checked your unread emails and I don't see any meetings for tomorrow.' Never dump the whole email list unless he asks for a summary."
+        "You are Xestlab Assistant, a sharp, proactive personal assistant and business coach for Israel. " +
+            "Do not greet the user unless told to. Never repeat the daily briefing unless asked. Never repeat information already given. " +
+            "Answer the user's actual question first in short, natural, direct sentences with no filler or robotic repetition. " +
+            "If asked 'what's on my list?' or what is pending, list ONLY the uncompleted Pending Tasks concisely (for example: 'You still have X and Y pending. Want help with either?') and do not re-read the whole checklist unless asked. " +
+            "When the user asks to add, create, or schedule a task, you MUST call the create_task function tool so it writes directly to storage, and NEVER claim a task was added unless create_task returned saved=true; after creating a task, confirm it in one line, then ask one short, useful next-step question (for example: 'Want me to break this into steps you can do today, set a reminder, or attach it to a bigger goal?'). " +
+            "Offer concrete, relevant next-step suggestions tied to his tasks, leads, and his 10M goal when appropriate. " +
+            "When the user says 'that's all', 'no more', or 'let me rest', stop asking follow-up questions and just do what was asked. " +
+            "If he asks 'do I have any meetings tomorrow?', scan the unread email subjects and snippets for keywords like 'meeting', 'invite', or specific dates and answer directly; if you don't see a meeting, explicitly say 'I checked your unread emails and I don't see any meetings for tomorrow.' Never dump the whole email list unless he asks for a summary."
 
     const val AI_BRAIN_UNREACHABLE_MESSAGE =
         "I cannot reach the AI brain right now. Check your internet or API key."
@@ -165,21 +173,21 @@ object AiClient {
                     )
                 }
             }
-            appendLine("Core Daily Checklist:")
-            checklist.forEach { item ->
-                val state = if (logs[item.id]?.isDone == true) "DONE" else "REMAINING"
-                appendLine("- [$state] ${item.title}")
-            }
-            appendLine("Pending Tasks & Reminders:")
+            appendLine("Uncompleted Pending Tasks on Plan > Today:")
             if (pending.isEmpty()) {
                 appendLine("- None")
             } else {
                 pending.forEach { item ->
                     val dueStr = item.dueAt?.let {
                         SimpleDateFormat("EEE yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(it))
-                    } ?: "Unscheduled"
+                    } ?: "Today / Unscheduled"
                     appendLine("- (${item.type}, ${item.priority}, $dueStr) ${item.title}")
                 }
+            }
+            appendLine("Core Daily Checklist (only mention if explicitly asked about daily checklist/routine):")
+            checklist.forEach { item ->
+                val state = if (logs[item.id]?.isDone == true) "DONE" else "REMAINING"
+                appendLine("- [$state] ${item.title}")
             }
             if (facts.isNotEmpty()) {
                 appendLine("Remembered Facts:")
@@ -190,17 +198,21 @@ object AiClient {
 
     /**
      * Primary AI Engine: Routes all chat and microphone prompts to Groq ("openai/gpt-oss-120b"),
-     * reading the API key strictly from EncryptedSharedPreferences.
+     * reading the API key strictly from EncryptedSharedPreferences, with real `create_task`
+     * function-calling wired to Room storage.
      */
     suspend fun generateAssistantResponse(
         userPrompt: String,
         db: AppDatabase,
         prefs: UserPreferencesState,
-        securePrefs: SecurePreferences
+        securePrefs: SecurePreferences,
+        suppressFollowUps: Boolean = false,
+        onCreateTask: (suspend (title: String, duePhrase: String?, priority: String?) -> Result<Item>)? = null
     ): Result<AssistantResponse> = withContext(Dispatchers.IO) {
         try {
             val localContext = buildLocalContext(db, prefs)
             val customWakeName = securePrefs.wakeWordName
+            val displayName = prefs.userName.ifBlank { "Israel" }
             val recentTurns = db.conversationDao()
                 .getLastTurnsDirect(6)
                 .reversed()
@@ -208,18 +220,21 @@ object AiClient {
 
             val systemInstruction = buildString {
                 appendLine(SYSTEM_COACH_PROMPT)
+                appendLine("Address the user as $displayName only when natural, and remember: Do not greet the user unless told to. Never repeat the daily briefing unless asked. Never repeat information already given.")
                 if (customWakeName.isNotBlank()) {
                     appendLine("Your wake word name is \"$customWakeName\". Respond naturally if addressed as $customWakeName.")
                 }
+                if (suppressFollowUps) {
+                    appendLine("IMPORTANT: The user asked to stop follow-up questions ('that's all' / 'no more' / 'let me rest'). Do NOT ask any follow-up questions in this reply. Just confirm or answer concisely.")
+                }
                 appendLine("If asked for a spoken summary of unread emails, read High priority emails first, then state only the count of the remaining Normal and Low emails.")
-                appendLine("Vary your sentence openings, cadence, and phrasing every turn so you never repeat yourself or sound scripted.")
                 append("Reply in plain spoken sentences with no markdown, backticks, asterisks, bullet symbols, or emojis because your reply will be spoken aloud via TextToSpeech.")
             }
 
             val contextualUserMessage = buildString {
                 appendLine("Live Workspace Context:")
                 appendLine(localContext)
-                append("King Israel says: $userPrompt")
+                append("$displayName says: $userPrompt")
             }
 
             val groqKey = securePrefs.getKeyForProvider(LlmProvider.GROQ)
@@ -232,40 +247,27 @@ object AiClient {
                 role to turn.text.take(350)
             }
 
-            executeGroqPost(
+            val userExplicitlyAskedGreeting = userAskedForGreeting(userPrompt)
+
+            executeGroqWithTools(
                 rawApiKey = groqKey,
                 systemPrompt = systemInstruction,
                 historyTurns = historyPairs,
-                userText = contextualUserMessage
+                userText = contextualUserMessage,
+                rawUserPrompt = userPrompt,
+                suppressFollowUps = suppressFollowUps,
+                onCreateTask = onCreateTask
             ).map { diag ->
+                val cleanedSpeech = stripLeadingGreeting(
+                    raw = sanitizeForSpeech(diag.replyText),
+                    allowGreeting = userExplicitlyAskedGreeting
+                )
                 AssistantResponse(
-                    replyText = sanitizeForSpeech(diag.replyText),
+                    replyText = cleanedSpeech,
                     providerUsed = LlmProvider.GROQ,
                     modelUsed = GROQ_MODEL
                 )
             }
-
-            /*
-             * GEMINI ROUTING TEMPORARILY DISABLED (Cloud permission issues):
-             *
-             * LlmProvider.GEMINI -> {
-             *     val key = securePrefs.getKeyForProvider(LlmProvider.GEMINI)
-             *         ?: return@withContext Result.failure(
-             *             IllegalStateException("No Gemini API key found in EncryptedSharedPreferences.")
-             *         )
-             *     executeGeminiPost(
-             *         rawApiKey = key,
-             *         systemPrompt = fullSystemInstruction,
-             *         userMessage = userPrompt
-             *     ).map { diag ->
-             *         AssistantResponse(
-             *             replyText = sanitizeForSpeech(diag.replyText),
-             *             providerUsed = LlmProvider.GEMINI,
-             *             modelUsed = GEMINI_MODEL
-             *         )
-             *     }
-             * }
-             */
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -537,6 +539,330 @@ object AiClient {
             )
         }
 
+    private fun buildCreateTaskToolSchema(): JSONArray {
+        val tool = JSONObject().apply {
+            put("type", "function")
+            put(
+                "function",
+                JSONObject().apply {
+                    put("name", "create_task")
+                    put(
+                        "description",
+                        "Creates and saves a task directly into the Plan > Today task database and verifies persistence."
+                    )
+                    put(
+                        "parameters",
+                        JSONObject().apply {
+                            put("type", "object")
+                            put(
+                                "properties",
+                                JSONObject().apply {
+                                    put(
+                                        "title",
+                                        JSONObject()
+                                            .put("type", "string")
+                                            .put("description", "Actionable task title to save.")
+                                    )
+                                    put(
+                                        "due_phrase",
+                                        JSONObject()
+                                            .put("type", "string")
+                                            .put("description", "Optional due phrase like 'today', 'tomorrow at 10am', 'this week', or empty string.")
+                                    )
+                                    put(
+                                        "priority",
+                                        JSONObject()
+                                            .put("type", "string")
+                                            .put("enum", JSONArray().put("HIGH").put("NORMAL").put("LOW"))
+                                            .put("description", "Task priority: HIGH, NORMAL, or LOW.")
+                                    )
+                                }
+                            )
+                            put("required", JSONArray().put("title"))
+                        }
+                    )
+                }
+            )
+        }
+        return JSONArray().put(tool)
+    }
+
+    private suspend fun executeGroqWithTools(
+        rawApiKey: String,
+        systemPrompt: String,
+        historyTurns: List<Pair<String, String>>,
+        userText: String,
+        rawUserPrompt: String,
+        suppressFollowUps: Boolean,
+        onCreateTask: (suspend (title: String, duePhrase: String?, priority: String?) -> Result<Item>)?
+    ): Result<ApiDiagnosticResult> {
+        if (onCreateTask == null) {
+            return executeGroqPost(
+                rawApiKey = rawApiKey,
+                systemPrompt = systemPrompt,
+                historyTurns = historyTurns,
+                userText = userText
+            )
+        }
+
+        return try {
+            val apiKey = SecurePreferences.sanitizeApiKey(rawApiKey)
+            val messagesArray = JSONArray().apply {
+                if (systemPrompt.isNotBlank()) {
+                    put(JSONObject().put("role", "system").put("content", systemPrompt))
+                }
+                historyTurns.forEach { (role, content) ->
+                    put(JSONObject().put("role", role).put("content", content))
+                }
+                put(JSONObject().put("role", "user").put("content", userText))
+            }
+
+            val payload = JSONObject().apply {
+                put("model", GROQ_MODEL)
+                put("messages", messagesArray)
+                put("temperature", 0.5)
+                put("tools", buildCreateTaskToolSchema())
+                put("tool_choice", "auto")
+            }
+
+            val request = Request.Builder()
+                .url(GROQ_URL)
+                .header("Authorization", "Bearer $apiKey")
+                .header("Content-Type", "application/json")
+                .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            val (statusCode, bodyStr, ok) = httpClient.newCall(request).execute().use { resp ->
+                Triple(resp.code, resp.body?.string().orEmpty(), resp.isSuccessful)
+            }
+
+            if (!ok) {
+                val detail = extractReadableApiError(bodyStr)
+                if (statusCode == 400 && detail.contains("tool", ignoreCase = true)) {
+                    return executeGroqPost(
+                        rawApiKey = rawApiKey,
+                        systemPrompt = systemPrompt,
+                        historyTurns = historyTurns,
+                        userText = userText
+                    )
+                }
+                Log.e(TAG, "Groq HTTP $statusCode ($GROQ_MODEL): $detail")
+                return Result.failure(
+                    ApiHttpException(
+                        provider = "GROQ/$GROQ_MODEL",
+                        statusCode = statusCode,
+                        statusMessage = "Error",
+                        errorDetail = detail
+                    )
+                )
+            }
+
+            val json = JSONObject(bodyStr)
+            val choices = json.optJSONArray("choices")
+                ?: return Result.failure(IllegalStateException("Groq HTTP 200 missing 'choices' array"))
+            if (choices.length() == 0) {
+                return Result.failure(IllegalStateException("Groq HTTP 200 empty 'choices' array"))
+            }
+            val messageObj = choices.getJSONObject(0).optJSONObject("message")
+                ?: return Result.failure(IllegalStateException("Groq HTTP 200 missing 'message' object"))
+
+            val toolCalls = messageObj.optJSONArray("tool_calls")
+            if (toolCalls != null && toolCalls.length() > 0) {
+                val followUpMessages = JSONArray()
+                for (i in 0 until messagesArray.length()) {
+                    followUpMessages.put(messagesArray.get(i))
+                }
+                followUpMessages.put(messageObj)
+
+                val savedItems = mutableListOf<Item>()
+                val saveErrors = mutableListOf<String>()
+
+                for (i in 0 until toolCalls.length()) {
+                    val tc = toolCalls.optJSONObject(i) ?: continue
+                    val callId = tc.optString("id", "call_$i")
+                    val fnObj = tc.optJSONObject("function")
+                    val fnName = fnObj?.optString("name", "").orEmpty()
+                    val argsRaw = fnObj?.optString("arguments", "{}").orEmpty()
+
+                    if (fnName == "create_task") {
+                        val argsJson = try {
+                            JSONObject(argsRaw)
+                        } catch (_: Exception) {
+                            JSONObject()
+                        }
+                        val title = argsJson.optString("title", "").trim()
+                        val duePhrase = argsJson.optString("due_phrase", "").trim().takeIf { it.isNotBlank() }
+                        val priority = argsJson.optString("priority", "NORMAL").trim().ifBlank { "NORMAL" }
+
+                        val saveResult = onCreateTask.invoke(title, duePhrase, priority)
+                        val toolResultPayload = JSONObject()
+                        saveResult.fold(
+                            onSuccess = { saved ->
+                                savedItems.add(saved)
+                                toolResultPayload.put("saved", true)
+                                toolResultPayload.put("verified_in_db", true)
+                                toolResultPayload.put("task_id", saved.id)
+                                toolResultPayload.put("title", saved.title)
+                                toolResultPayload.put("status", saved.status)
+                            },
+                            onFailure = { err ->
+                                val errMsg = err.message ?: "Failed to write task to storage"
+                                saveErrors.add(errMsg)
+                                toolResultPayload.put("saved", false)
+                                toolResultPayload.put("verified_in_db", false)
+                                toolResultPayload.put("error", errMsg)
+                            }
+                        )
+
+                        followUpMessages.put(
+                            JSONObject().apply {
+                                put("role", "tool")
+                                put("tool_call_id", callId)
+                                put("name", "create_task")
+                                put("content", toolResultPayload.toString())
+                            }
+                        )
+                    }
+                }
+
+                // Never let an error be reported as a success
+                if (saveErrors.isNotEmpty() && savedItems.isEmpty()) {
+                    return Result.success(
+                        ApiDiagnosticResult(
+                            provider = LlmProvider.GROQ,
+                            modelUsed = GROQ_MODEL,
+                            statusCode = statusCode,
+                            replyText = "I tried to add that task, but saving to your plan failed: ${saveErrors.first()}."
+                        )
+                    )
+                }
+
+                val secondPayload = JSONObject().apply {
+                    put("model", GROQ_MODEL)
+                    put("messages", followUpMessages)
+                    put("temperature", 0.5)
+                }
+                val secondReq = Request.Builder()
+                    .url(GROQ_URL)
+                    .header("Authorization", "Bearer $apiKey")
+                    .header("Content-Type", "application/json")
+                    .post(secondPayload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
+
+                val fallbackConfirmation = if (savedItems.isNotEmpty()) {
+                    val joined = savedItems.joinToString(", ") { "'${it.title}'" }
+                    val followUp = if (suppressFollowUps) {
+                        ""
+                    } else {
+                        " Want me to break this into steps you can do today, set a reminder, or attach it to a bigger goal?"
+                    }
+                    "Added $joined to Today's plan.$followUp"
+                } else {
+                    "I couldn't verify that task in your plan storage."
+                }
+
+                val finalReply = try {
+                    httpClient.newCall(secondReq).execute().use { resp2 ->
+                        val body2 = resp2.body?.string().orEmpty()
+                        if (resp2.isSuccessful) {
+                            val json2 = JSONObject(body2)
+                            val msg2 = json2.optJSONArray("choices")
+                                ?.optJSONObject(0)
+                                ?.optJSONObject("message")
+                                ?.optString("content", "")
+                                ?.trim()
+                                .orEmpty()
+                            msg2.ifBlank { fallbackConfirmation }
+                        } else {
+                            fallbackConfirmation
+                        }
+                    }
+                } catch (_: Exception) {
+                    fallbackConfirmation
+                }
+
+                return Result.success(
+                    ApiDiagnosticResult(
+                        provider = LlmProvider.GROQ,
+                        modelUsed = GROQ_MODEL,
+                        statusCode = statusCode,
+                        replyText = finalReply
+                    )
+                )
+            }
+
+            val content = messageObj.optString("content", "").trim()
+            if (content.isEmpty()) {
+                return Result.failure(IllegalStateException("Groq HTTP 200 blank choices[0].message.content"))
+            }
+
+            // Guardrail: never allow an unverified "I've added / created / saved" claim if the model skipped create_task
+            val claimsTaskSaved = Regex(
+                "\\b(?:i've|i\\s+have|i)\\s+(?:added|created|saved|scheduled)\\b",
+                RegexOption.IGNORE_CASE
+            ).containsMatchIn(content)
+            val userMentionedTask = Regex(
+                "\\b(?:add|create|make|put|save)\\b.*\\b(?:task|list|plan|todo|to-do)\\b",
+                RegexOption.IGNORE_CASE
+            ).containsMatchIn(rawUserPrompt)
+
+            if (claimsTaskSaved && userMentionedTask) {
+                val extractedTitle = extractFallbackTaskTitle(rawUserPrompt)
+                if (extractedTitle.isNotBlank()) {
+                    val forcedSave = onCreateTask.invoke(extractedTitle, null, "NORMAL")
+                    return forcedSave.fold(
+                        onSuccess = { saved ->
+                            val followUp = if (suppressFollowUps) {
+                                ""
+                            } else {
+                                " Want me to break this into steps you can do today, set a reminder, or attach it to a bigger goal?"
+                            }
+                            Result.success(
+                                ApiDiagnosticResult(
+                                    provider = LlmProvider.GROQ,
+                                    modelUsed = GROQ_MODEL,
+                                    statusCode = statusCode,
+                                    replyText = "Added '${saved.title}' to Today's plan.$followUp"
+                                )
+                            )
+                        },
+                        onFailure = { err ->
+                            Result.success(
+                                ApiDiagnosticResult(
+                                    provider = LlmProvider.GROQ,
+                                    modelUsed = GROQ_MODEL,
+                                    statusCode = statusCode,
+                                    replyText = "I tried to save '$extractedTitle' to your plan, but saving failed: ${err.message ?: "storage error"}."
+                                )
+                            )
+                        }
+                    )
+                } else {
+                    return Result.success(
+                        ApiDiagnosticResult(
+                            provider = LlmProvider.GROQ,
+                            modelUsed = GROQ_MODEL,
+                            statusCode = statusCode,
+                            replyText = "That task wasn't saved yet. Tell me the exact task title, like 'add a task: send sample websites to five clients', and I'll save it to Today."
+                        )
+                    )
+                }
+            }
+
+            Result.success(
+                ApiDiagnosticResult(
+                    provider = LlmProvider.GROQ,
+                    modelUsed = GROQ_MODEL,
+                    statusCode = statusCode,
+                    replyText = content
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Groq tool request failed: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
     /**
      * Groq API Service:
      * - URL: https://api.groq.com/openai/v1/chat/completions
@@ -581,7 +907,7 @@ object AiClient {
             val payload = JSONObject().apply {
                 put("model", GROQ_MODEL)
                 put("messages", messagesArray)
-                put("temperature", 0.8)
+                put("temperature", 0.6)
             }
 
             val request = Request.Builder()
@@ -758,6 +1084,40 @@ object AiClient {
         }
     }
 
+    private fun extractFallbackTaskTitle(rawPrompt: String): String {
+        val cleaned = rawPrompt.trim().trimEnd('.', '!', '?')
+        val regex = Regex(
+            "(?:add|create|make|save|put)\\s+(?:a\\s+|new\\s+)?(?:task|to-?do)(?:\\s+to|\\s*[:\\-])?\\s+(.+)$",
+            RegexOption.IGNORE_CASE
+        )
+        val body = regex.find(cleaned)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+        return body.replaceFirstChar {
+            if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString()
+        }
+    }
+
+    private fun userAskedForGreeting(rawPrompt: String): Boolean {
+        val lower = rawPrompt.trim().lowercase(Locale.getDefault()).trimEnd('.', '!', '?')
+        return lower == "greet me" || lower == "say hello" || lower == "say good morning"
+    }
+
+    fun stripLeadingGreeting(raw: String, allowGreeting: Boolean = false): String {
+        val trimmed = raw.trim()
+        if (allowGreeting || trimmed.isEmpty()) return trimmed
+        val greetingRegex = Regex(
+            "^(?:good\\s+(?:morning|afternoon|evening)|hello|hi|hey)(?:\\s*,?\\s+(?:king\\s+israel|israel))?\\s*[.!?,:\\-]\\s*",
+            RegexOption.IGNORE_CASE
+        )
+        val stripped = trimmed.replaceFirst(greetingRegex, "").trim()
+        return if (stripped.isNotEmpty()) {
+            stripped.replaceFirstChar {
+                if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString()
+            }
+        } else {
+            trimmed
+        }
+    }
+
     fun sanitizeForSpeech(raw: String): String {
         return raw
             .replace("```", " ")
@@ -771,3 +1131,4 @@ object AiClient {
             .trim()
     }
 }
+

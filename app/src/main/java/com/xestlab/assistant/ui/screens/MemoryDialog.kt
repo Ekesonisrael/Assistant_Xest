@@ -97,7 +97,7 @@ fun MemoryDialog(
                         shape = CardShape8,
                         colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                     ) {
-                        Text("Add", color = BgDark, fontWeight = FontWeight.SemiBold)
+                        Text("Add", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
                     }
                 }
 
@@ -154,7 +154,7 @@ fun MemoryDialog(
                 shape = CardShape8,
                 colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
             ) {
-                Text("Done", color = BgDark, fontWeight = FontWeight.SemiBold)
+                Text("Done", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = {

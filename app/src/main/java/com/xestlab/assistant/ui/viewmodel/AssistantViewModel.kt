@@ -99,6 +99,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val securePrefs = SecurePreferences(appContext)
 
     private var hasAutoReadPlanInSession = false
+    private var suppressFollowUpQuestions = false
 
     private val _isSpeaking = MutableStateFlow(false)
     val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
@@ -344,7 +345,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             AlarmScheduler.scheduleAllActive(appContext, cleanWake, schedules, pending)
 
             hasAutoReadPlanInSession = true
-            val script = repository.buildSpokenDailyPlan(isWakeUpAlarm = true)
+            securePrefs.markBriefingShownToday()
+            val firstGreeting = securePrefs.consumePeriodGreetingIfNeeded(trimmedName)
+            val script = repository.buildSpokenDailyPlan(
+                overrideGreetingPrefix = firstGreeting.takeIf { it.isNotBlank() },
+                isWakeUpAlarm = true,
+                includeGreeting = false
+            )
             _dailyPlanSummary.value = script
             repository.recordTurn("ASSISTANT", script)
             speakText(script, isWakeUpBriefing = true)
@@ -355,9 +362,20 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             refreshDailyPlanText()
             val prefs = userPreferencesDataStore.getSnapshot()
-            if (!hasAutoReadPlanInSession && prefs.isFirstLaunchComplete && prefs.userName.isNotBlank() && prefs.autoReadPlanOnLaunch) {
+            if (
+                !hasAutoReadPlanInSession &&
+                prefs.isFirstLaunchComplete &&
+                prefs.userName.isNotBlank() &&
+                prefs.autoReadPlanOnLaunch &&
+                securePrefs.shouldShowAutoBriefingToday()
+            ) {
                 hasAutoReadPlanInSession = true
-                val script = repository.buildSpokenDailyPlan()
+                securePrefs.markBriefingShownToday()
+                val periodGreeting = securePrefs.consumePeriodGreetingIfNeeded(prefs.userName)
+                val script = repository.buildSpokenDailyPlan(
+                    overrideGreetingPrefix = periodGreeting.takeIf { it.isNotBlank() },
+                    includeGreeting = false
+                )
                 _dailyPlanSummary.value = script
                 speakText(script, isWakeUpBriefing = true)
             }
@@ -366,16 +384,86 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refreshDailyPlanText() {
         viewModelScope.launch {
-            _dailyPlanSummary.value = repository.buildSpokenDailyPlan()
+            _dailyPlanSummary.value = repository.buildSpokenDailyPlan(includeGreeting = false)
         }
     }
 
     fun readDailyPlanAloud() {
         viewModelScope.launch {
-            val script = repository.buildSpokenDailyPlan(isWakeUpAlarm = true)
+            val prefs = userPreferencesDataStore.getSnapshot()
+            val periodGreeting = securePrefs.consumePeriodGreetingIfNeeded(prefs.userName)
+            securePrefs.markBriefingShownToday()
+            val script = repository.buildSpokenDailyPlan(
+                overrideGreetingPrefix = periodGreeting.takeIf { it.isNotBlank() },
+                isWakeUpAlarm = true,
+                includeGreeting = false
+            )
             _dailyPlanSummary.value = script
             repository.recordTurn("ASSISTANT", script)
             speakText(script, isWakeUpBriefing = true)
+        }
+    }
+
+    private fun applyDeterministicGreeting(
+        body: String,
+        userName: String,
+        allowGreeting: Boolean = true
+    ): String {
+        val cleanBody = body.trim()
+        if (!allowGreeting || cleanBody.isEmpty()) return cleanBody
+        val greeting = securePrefs.consumePeriodGreetingIfNeeded(userName)
+        return if (greeting.isNotEmpty()) {
+            "$greeting $cleanBody"
+        } else {
+            cleanBody
+        }
+    }
+
+    private fun resolveDuePhraseMillis(duePhrase: String?, nowMillis: Long = System.currentTimeMillis()): Long? {
+        val raw = duePhrase?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val lower = raw.lowercase(Locale.US)
+        if (lower == "today") return null
+        AssistantParser.extractTimeMillis(raw, nowMillis)?.let { return it }
+        return when {
+            lower.contains("this week") || lower.contains("next week") -> nowMillis + 7L * 86_400_000L
+            lower.contains("this month") || lower.contains("next month") -> nowMillis + 30L * 86_400_000L
+            lower.contains("this year") -> {
+                Calendar.getInstance().apply {
+                    timeInMillis = nowMillis
+                    set(Calendar.MONTH, Calendar.DECEMBER)
+                    set(Calendar.DAY_OF_MONTH, 31)
+                    set(Calendar.HOUR_OF_DAY, 18)
+                    set(Calendar.MINUTE, 0)
+                }.timeInMillis
+            }
+            else -> null
+        }
+    }
+
+    private suspend fun buildConcisePendingListReply(suppressFollowUps: Boolean): String {
+        val pendingTasks = db.itemDao().getPendingItemsDirect()
+            .filter { !it.sourceText.startsWith("web_pipeline_") }
+        return if (pendingTasks.isEmpty()) {
+            if (suppressFollowUps) {
+                "You have no uncompleted tasks pending right now."
+            } else {
+                "You have no uncompleted tasks pending right now. Want to add one for today?"
+            }
+        } else {
+            val titles = pendingTasks.take(5).map { it.title.trim() }.filter { it.isNotEmpty() }
+            val extraCount = (pendingTasks.size - titles.size).coerceAtLeast(0)
+            val listText = when (titles.size) {
+                1 -> titles[0]
+                2 -> "${titles[0]} and ${titles[1]}"
+                else -> titles.dropLast(1).joinToString(", ") + ", and " + titles.last()
+            } + if (extraCount > 0) " (plus $extraCount more)" else ""
+
+            val followUp = when {
+                suppressFollowUps -> ""
+                pendingTasks.size == 1 -> " Want help tackling it now?"
+                else -> " Want help with either?"
+            }
+            "You still have $listText pending.$followUp"
         }
     }
 
@@ -413,7 +501,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             repository.recordTurn("USER", cleaned)
             val prefs = userPreferencesDataStore.getSnapshot()
-            val name = prefs.userName.ifBlank { "King Israel" }
+            val name = prefs.userName.ifBlank { "Israel" }
 
             // Intercept active voice/on-screen confirmation replies first
             val activePending = _pendingConfirmation.value
@@ -435,6 +523,31 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     respond("Cancelled — nothing was saved.", speak = true)
                     return@launch
                 }
+            }
+
+            // Handle "that's all", "no more", "let me rest" stop-follow-ups phrases
+            if (AssistantParser.isStopQuestionsPhrase(cleaned)) {
+                suppressFollowUpQuestions = true
+                val lowerClean = cleaned.lowercase(Locale.US).trimEnd('.', '!', '?')
+                val standaloneStop = lowerClean in setOf(
+                    "that's all",
+                    "thats all",
+                    "that is all",
+                    "that will be all",
+                    "no more",
+                    "no more questions",
+                    "let me rest",
+                    "i want to rest",
+                    "let me sleep",
+                    "nothing else",
+                    "stop asking"
+                )
+                if (standaloneStop) {
+                    respond("Got it. Get some rest.", speak = true)
+                    return@launch
+                }
+            } else if (cleaned.endsWith("?")) {
+                suppressFollowUpQuestions = false
             }
 
             val intent = AssistantParser.parse(cleaned)
@@ -664,20 +777,46 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 }
 
                 is ParsedIntent.Task -> {
-                    val candidate = Item(
-                        type = "TASK",
-                        title = intent.title,
+                    val cleanedTaskTitle = intent.title
+                        .replace(
+                            Regex(",?\\s*(?:that's all|thats all|no more|let me rest)$", RegexOption.IGNORE_CASE),
+                            ""
+                        )
+                        .trim()
+                        .ifBlank { intent.title }
+
+                    val saveResult = repository.createTaskVerified(
+                        context = appContext,
+                        title = cleanedTaskTitle,
                         dueAt = intent.dueAt,
                         durationMinutes = intent.durationMinutes,
                         priority = intent.priority,
+                        type = "TASK",
                         sourceText = intent.sourceText
                     )
-                    val proposal = PlannerEngine.propose(db, prefs, candidate)
-                    _activeProposal.value = proposal
-                    val recLabel = proposal.recommendation.name.replace('_', ' ')
-                    respond(
-                        "Planner suggests $recLabel for '${candidate.title}'. ${proposal.reason}",
-                        speak = true
+
+                    saveResult.fold(
+                        onSuccess = { saved ->
+                            _activeProposal.value = null
+                            refreshDailyPlanText()
+                            refreshWeeklySummary()
+                            val nextStepQuestion = if (suppressFollowUpQuestions) {
+                                ""
+                            } else {
+                                " Want me to break this into steps you can do today, set a reminder, or attach it to a bigger goal?"
+                            }
+                            val body = "Added '${saved.title}' to Today's plan.$nextStepQuestion"
+                            respond(
+                                applyDeterministicGreeting(body, name, allowGreeting = true),
+                                speak = true
+                            )
+                        },
+                        onFailure = { err ->
+                            respond(
+                                "I tried to add '${cleanedTaskTitle}', but saving to your plan failed: ${err.message ?: "database write error"}.",
+                                speak = true
+                            )
+                        }
                     )
                 }
 
@@ -704,9 +843,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         userMessage: String,
         prefs: UserPreferencesState
     ) {
+        val displayName = prefs.userName.ifBlank { "Israel" }
+        val isListQuery = AssistantParser.isWhatsOnMyListQuery(userMessage)
+
         if (securePrefs.isAiEnabled || securePrefs.hasGroqKey()) {
             val storedGroqKey = securePrefs.getKeyForProvider(LlmProvider.GROQ)
             if (storedGroqKey.isNullOrBlank()) {
+                if (isListQuery) {
+                    respond(buildConcisePendingListReply(suppressFollowUpQuestions), speak = true)
+                    return
+                }
                 val missingMsg = "No GROQ API key found in EncryptedSharedPreferences. Open Settings and save your Groq key first."
                 _llmTestIsError.value = true
                 _llmTestDiagnosticText.value = missingMsg
@@ -719,7 +865,26 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 userPrompt = userMessage,
                 db = db,
                 prefs = prefs,
-                securePrefs = securePrefs
+                securePrefs = securePrefs,
+                suppressFollowUps = suppressFollowUpQuestions,
+                onCreateTask = { title, duePhrase, priority ->
+                    val dueMillis = resolveDuePhraseMillis(duePhrase)
+                    val verifiedResult = repository.createTaskVerified(
+                        context = appContext,
+                        title = title,
+                        dueAt = dueMillis,
+                        durationMinutes = 30,
+                        priority = priority ?: "NORMAL",
+                        type = "TASK",
+                        sourceText = "coach_tool:$userMessage"
+                    )
+                    if (verifiedResult.isSuccess) {
+                        _activeProposal.value = null
+                        refreshDailyPlanText()
+                        refreshWeeklySummary()
+                    }
+                    verifiedResult
+                }
             )
             _isThinking.value = false
 
@@ -728,27 +893,39 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     _llmTestIsError.value = false
                     _llmTestDiagnosticText.value =
                         "HTTP 200 OK [${aiResp.providerUsed.name}/${aiResp.modelUsed}]: ${aiResp.replyText}"
-                    // Speak Groq's response out loud via TextToSpeech
-                    respond(aiResp.replyText, speak = true)
+                    val finalReply = applyDeterministicGreeting(
+                        body = aiResp.replyText,
+                        userName = displayName,
+                        allowGreeting = !isListQuery && !suppressFollowUpQuestions
+                    )
+                    respond(finalReply, speak = true)
                 },
                 onFailure = { err ->
                     val exactDiag = AiClient.formatThrowableDiagnostic(err)
                     _llmTestIsError.value = true
                     _llmTestDiagnosticText.value = exactDiag
-                    repository.recordTurn(
-                        "ASSISTANT",
-                        "${AiClient.AI_BRAIN_UNREACHABLE_MESSAGE}\n[Diagnostic: $exactDiag]"
-                    )
-                    speakText(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE)
+                    if (isListQuery) {
+                        respond(buildConcisePendingListReply(suppressFollowUpQuestions), speak = true)
+                    } else {
+                        repository.recordTurn(
+                            "ASSISTANT",
+                            "${AiClient.AI_BRAIN_UNREACHABLE_MESSAGE}\n[Diagnostic: $exactDiag]"
+                        )
+                        speakText(AiClient.AI_BRAIN_UNREACHABLE_MESSAGE)
+                    }
                 }
             )
         } else {
-            val offlinePlan = repository.buildSpokenDailyPlan()
-            _dailyPlanSummary.value = offlinePlan
-            respond(
-                "$offlinePlan (Enable Groq AI routing in Settings for full business coach conversation, or prefix with 'Note:' to save a note.)",
-                speak = true
-            )
+            if (isListQuery) {
+                respond(buildConcisePendingListReply(suppressFollowUpQuestions), speak = true)
+            } else {
+                val pendingReply = buildConcisePendingListReply(suppressFollowUps = true)
+                val body = "$pendingReply Enable Groq AI in Settings for full coach conversation, or say 'add a task: ...' to save a task."
+                respond(
+                    applyDeterministicGreeting(body, displayName, allowGreeting = !suppressFollowUpQuestions),
+                    speak = true
+                )
+            }
         }
     }
 
