@@ -48,19 +48,24 @@ class AlarmReceiver : BroadcastReceiver() {
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                AlarmScheduler.recordAlarmFired(context, title)
+
                 val prefsStore = UserPreferencesDataStore(context)
                 val prefs = prefsStore.getSnapshot()
                 val db = AppDatabase.getInstance(context)
 
-                // Reschedule repeating 7:30 AM wake-up alarm or daily briefings for tomorrow
-                if (isWakeUp && !isTest) {
-                    AlarmScheduler.scheduleWakeUpAlarm(context, prefs.wakeUpTime)
-                } else if (!isTest) {
-                    val matchingSchedule = db.reminderDao().getAllRemindersDirect()
-                        .firstOrNull { it.id == alarmId && it.isActive && it.isRepeating }
-                    if (matchingSchedule != null) {
-                        AlarmScheduler.scheduleDailyBriefing(context, matchingSchedule)
-                    }
+                // Reschedule repeating 7:30 AM wake-up alarm or daily briefings for tomorrow & refresh next alarm telemetry
+                val schedules = db.reminderDao().getAllRemindersDirect()
+                val pendingItems = db.itemDao().getPendingItemsDirect()
+                if (!isTest) {
+                    AlarmScheduler.scheduleAllActive(
+                        context = context,
+                        wakeUpTime = prefs.wakeUpTime,
+                        schedules = schedules,
+                        pendingItems = pendingItems
+                    )
+                } else {
+                    AlarmScheduler.syncAlarmTelemetry(context)
                 }
 
                 val displayName = prefs.userName.ifBlank { "King Israel" }
@@ -275,7 +280,9 @@ class EmailTaskActionReceiver : BroadcastReceiver() {
         const val EXTRA_EMAIL_ID = "extra_email_id"
         const val EXTRA_TASK_TITLE = "extra_email_task_title"
         const val EXTRA_SENDER = "extra_email_sender"
+        const val EXTRA_SENDER_ADDRESS = "extra_email_sender_address"
         const val EXTRA_SUBJECT = "extra_email_subject"
+        const val EXTRA_SNIPPET = "extra_email_snippet"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -285,7 +292,9 @@ class EmailTaskActionReceiver : BroadcastReceiver() {
         val emailId = intent.getStringExtra(EXTRA_EMAIL_ID).orEmpty()
         val taskTitle = intent.getStringExtra(EXTRA_TASK_TITLE) ?: "Follow up email"
         val sender = intent.getStringExtra(EXTRA_SENDER) ?: "Email"
+        val senderAddress = intent.getStringExtra(EXTRA_SENDER_ADDRESS).orEmpty()
         val subject = intent.getStringExtra(EXTRA_SUBJECT) ?: taskTitle
+        val snippet = intent.getStringExtra(EXTRA_SNIPPET).orEmpty()
 
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.cancel(notificationId)
@@ -307,6 +316,13 @@ class EmailTaskActionReceiver : BroadcastReceiver() {
                 if (emailId.isNotBlank()) {
                     db.emailDao().markAddedToTasks(emailId)
                 }
+                EmailPriorityEngine.learnPositiveInteraction(
+                    db = db,
+                    senderDisplay = sender,
+                    senderAddress = senderAddress,
+                    subject = subject,
+                    snippet = snippet
+                )
             } finally {
                 pendingResult.finish()
             }

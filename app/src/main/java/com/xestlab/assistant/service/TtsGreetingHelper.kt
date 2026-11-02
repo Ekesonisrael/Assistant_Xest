@@ -97,10 +97,11 @@ object TtsGreetingHelper {
     /**
      * Builds the complete time-aware spoken daily briefing from Room:
      * - Greeting based on `Calendar.HOUR_OF_DAY` (0-11 morning, 12-16 afternoon, 17-23 evening)
+     * - High and Normal non-dismissed unread emails appear in the daily briefing; Low emails are only counted.
      * - If tasks remain:
-     *   "You have [X] tasks remaining. Let's focus on [First Task]. What do you want to do first?"
+     *   "You have [X] tasks remaining. Let's focus on [First Task]. ... What do you want to do first?"
      * - If ZERO tasks remain:
-     *   "You have cleared all your tasks for today. Excellent work. You should rest."
+     *   "You have cleared all your tasks for today. Excellent work. ... You should rest."
      */
     suspend fun buildDynamicBriefing(
         db: AppDatabase,
@@ -110,12 +111,41 @@ object TtsGreetingHelper {
         val remainingTitles = getRemainingTaskTitlesForToday(db)
         val remainingCount = remainingTitles.size
 
+        val activeEmails = db.emailDao().getActiveUnreadDirect(50)
+        val highEmails = activeEmails.filter { it.priority == "HIGH" }
+        val normalEmails = activeEmails.filter { it.priority == "NORMAL" }
+        val lowCount = activeEmails.count { it.priority == "LOW" }
+
+        val emailBriefingSegment = buildList {
+            if (highEmails.isNotEmpty()) {
+                val preview = highEmails.take(3).joinToString("; ") { "${it.sender}: ${it.subject}" }
+                val extra = if (highEmails.size > 3) " and ${highEmails.size - 3} more" else ""
+                add("High-priority emails (${highEmails.size}): $preview$extra.")
+            }
+            if (normalEmails.isNotEmpty()) {
+                val preview = normalEmails.take(3).joinToString("; ") { "${it.sender}: ${it.subject}" }
+                val extra = if (normalEmails.size > 3) " and ${normalEmails.size - 3} more" else ""
+                add("Normal emails (${normalEmails.size}): $preview$extra.")
+            }
+            if (lowCount > 0) {
+                add("Low-priority emails: $lowCount unread.")
+            }
+        }.joinToString(" ")
+
         return if (remainingCount > 0) {
             val firstTask = remainingTitles.first()
             val taskNoun = if (remainingCount == 1) "task" else "tasks"
-            "$greeting You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. What do you want to do first?"
+            if (emailBriefingSegment.isNotBlank()) {
+                "$greeting You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. $emailBriefingSegment What do you want to do first?"
+            } else {
+                "$greeting You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. What do you want to do first?"
+            }
         } else {
-            "$greeting You have cleared all your tasks for today. Excellent work. You should rest."
+            if (emailBriefingSegment.isNotBlank()) {
+                "$greeting You have cleared all your tasks for today. Excellent work. $emailBriefingSegment You should rest."
+            } else {
+                "$greeting You have cleared all your tasks for today. Excellent work. You should rest."
+            }
         }
     }
 

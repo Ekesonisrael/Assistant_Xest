@@ -5,6 +5,8 @@ import com.xestlab.assistant.data.LlmProvider
 import com.xestlab.assistant.data.SecurePreferences
 import com.xestlab.assistant.data.UserPreferencesState
 import com.xestlab.assistant.data.local.AppDatabase
+import com.xestlab.assistant.data.model.tagsList
+import com.xestlab.assistant.service.EmailClassificationDecision
 import com.xestlab.assistant.service.TtsGreetingHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -44,6 +46,13 @@ data class EmailAnalysisResult(
     val isActionable: Boolean,
     val category: String, // "TASK", "INVOICE", "GENERAL"
     val extractedTaskTitle: String?
+)
+
+data class AiEmailBatchInput(
+    val id: String,
+    val sender: String,
+    val subject: String,
+    val snippet: String
 )
 
 object AiClient {
@@ -104,7 +113,16 @@ object AiClient {
             .filter { !it.sourceText.startsWith("web_pipeline_") }
             .take(10)
         val facts = db.factDao().getAllFactsDirect().take(12)
-        val unreadEmails = db.emailDao().getRecentUnreadDirect(20)
+        val unreadEmails = db.emailDao().getActiveUnreadDirect(50)
+            .sortedWith(
+                compareBy<com.xestlab.assistant.data.model.UnreadEmailEntity> {
+                    when (it.priority) {
+                        "HIGH" -> 0
+                        "NORMAL" -> 1
+                        else -> 2
+                    }
+                }.thenByDescending { it.receivedAt }
+            )
         val goal = db.goalDao().getGoalsDirect()
 
         return buildString {
@@ -114,15 +132,26 @@ object AiClient {
             if (goal != null) {
                 appendLine("Annual Revenue Target: NGN ${String.format(Locale.US, "%,d", goal.yearlyGoal)}")
             }
-            appendLine("Unread Emails Summary (${unreadEmails.size} unread):")
+            val highCount = unreadEmails.count { it.priority == "HIGH" }
+            val normalCount = unreadEmails.count { it.priority == "NORMAL" }
+            val lowCount = unreadEmails.count { it.priority == "LOW" }
+            appendLine("Unread Emails Summary (${unreadEmails.size} unread: $highCount High, $normalCount Normal, $lowCount Low):")
             if (unreadEmails.isEmpty()) {
                 appendLine("- None (0 unread emails currently in inbox).")
             } else {
-                unreadEmails.forEach { email ->
+                unreadEmails.take(30).forEach { email ->
                     val receivedStr = emailTimeFmt.format(Date(email.receivedAt))
                     val snippetClean = email.snippet.replace(Regex("\\s+"), " ").trim().take(140)
+                    val tagsNote = if (email.tagsList.isNotEmpty()) {
+                        " | Tags: ${email.tagsList.joinToString(",")}"
+                    } else {
+                        ""
+                    }
+                    val eventNote = email.eventTimeMillis?.let {
+                        " | EventTime: ${emailTimeFmt.format(Date(it))}"
+                    }.orEmpty()
                     appendLine(
-                        "- [$receivedStr] From: ${email.sender} | Subject: ${email.subject}" +
+                        "- [${email.priority}] [$receivedStr] From: ${email.sender} | Subject: ${email.subject}$tagsNote$eventNote" +
                             if (snippetClean.isNotEmpty()) " | Preview: $snippetClean" else ""
                     )
                 }
@@ -173,6 +202,7 @@ object AiClient {
                 if (customWakeName.isNotBlank()) {
                     appendLine("Your wake word name is \"$customWakeName\". Respond naturally if addressed as $customWakeName.")
                 }
+                appendLine("If asked for a spoken summary of unread emails, read High priority emails first, then state only the count of the remaining Normal and Low emails.")
                 appendLine("Vary your sentence openings, cadence, and phrasing every turn so you never repeat yourself or sound scripted.")
                 append("Reply in plain spoken sentences with no markdown, backticks, asterisks, bullet symbols, or emojis because your reply will be spoken aloud via TextToSpeech.")
             }
@@ -240,6 +270,105 @@ object AiClient {
     ): String {
         val displayName = prefs.userName.ifBlank { "King Israel" }
         return TtsGreetingHelper.buildDynamicBriefing(db, displayName)
+    }
+
+    /**
+     * Classifies unread emails via Groq using ONLY sender, subject, and a short snippet.
+     * Returns an empty map on network/parse error so the caller falls back to offline rules.
+     */
+    suspend fun classifyEmailsBatchViaGroq(
+        inputs: List<AiEmailBatchInput>,
+        prioritySenders: List<String>,
+        lowSenders: List<String>,
+        emailedContacts: List<String>,
+        learnedKeywords: List<String>,
+        securePrefs: SecurePreferences
+    ): Map<String, EmailClassificationDecision> = withContext(Dispatchers.IO) {
+        if (inputs.isEmpty() || !securePrefs.isAiEnabled || !securePrefs.hasGroqKey()) {
+            return@withContext emptyMap()
+        }
+        val key = securePrefs.getKeyForProvider(LlmProvider.GROQ) ?: return@withContext emptyMap()
+
+        try {
+            val emailsJson = JSONArray()
+            inputs.forEachIndexed { idx, item ->
+                emailsJson.put(
+                    JSONObject().apply {
+                        put("i", idx)
+                        put("sender", item.sender.take(100))
+                        put("subject", item.subject.take(120))
+                        put("snippet", item.snippet.take(160))
+                    }
+                )
+            }
+
+            val classifierSystemPrompt = buildString {
+                appendLine("You classify unread emails for King Israel as HIGH, NORMAL, or LOW using ONLY sender, subject, and snippet.")
+                appendLine("Rules:")
+                appendLine("- HIGH: meetings, invitations, calls, interviews, appointments, deadlines, invoices, payments, proposals, urgent, security alerts, replies from people he has emailed, and senders on his priority list.")
+                appendLine("- LOW: newsletters, promotions, social and game notifications, and anything from a no-reply address or unsubscribe list.")
+                appendLine("- NORMAL: everything else.")
+                if (prioritySenders.isNotEmpty()) {
+                    appendLine("Priority senders: ${prioritySenders.take(25).joinToString(", ")}")
+                }
+                if (lowSenders.isNotEmpty()) {
+                    appendLine("Low-priority senders: ${lowSenders.take(25).joinToString(", ")}")
+                }
+                if (emailedContacts.isNotEmpty()) {
+                    appendLine("People King Israel has emailed: ${emailedContacts.take(30).joinToString(", ")}")
+                }
+                if (learnedKeywords.isNotEmpty()) {
+                    appendLine("Learned priority keywords: ${learnedKeywords.take(25).joinToString(", ")}")
+                }
+                append("Reply ONLY with a valid JSON array: [{\"i\":0,\"priority\":\"HIGH\"|\"NORMAL\"|\"LOW\",\"why\":\"one short reason under 60 chars\",\"category\":\"INVOICE\"|\"MEETING\"|\"TASK\"|\"GENERAL\",\"taskTitle\":\"short task title\"}]")
+            }
+
+            val rawReply = executeGroqPost(
+                rawApiKey = key,
+                systemPrompt = classifierSystemPrompt,
+                userText = emailsJson.toString()
+            ).getOrNull()?.replyText ?: return@withContext emptyMap()
+
+            val arrStart = rawReply.indexOf('[')
+            val arrEnd = rawReply.lastIndexOf(']')
+            if (arrStart == -1 || arrEnd <= arrStart) return@withContext emptyMap()
+
+            val parsedArray = JSONArray(rawReply.substring(arrStart, arrEnd + 1))
+            val resultMap = HashMap<String, EmailClassificationDecision>()
+            for (pos in 0 until parsedArray.length()) {
+                val obj = parsedArray.optJSONObject(pos) ?: continue
+                val idx = obj.optInt("i", -1)
+                if (idx !in inputs.indices) continue
+                val targetInput = inputs[idx]
+                val prioRaw = obj.optString("priority", "NORMAL").uppercase(Locale.US)
+                val prio = if (prioRaw in setOf("HIGH", "NORMAL", "LOW")) prioRaw else "NORMAL"
+                val why = obj.optString("why", "").trim()
+                    .ifBlank {
+                        when (prio) {
+                            "HIGH" -> "AI classified as high priority"
+                            "LOW" -> "AI classified as low priority"
+                            else -> "AI classified as normal priority"
+                        }
+                    }
+                    .take(80)
+                val catRaw = obj.optString("category", "GENERAL").uppercase(Locale.US)
+                val cat = if (catRaw in setOf("INVOICE", "MEETING", "TASK", "GENERAL")) catRaw else "GENERAL"
+                val taskTitle = obj.optString("taskTitle", "").trim()
+                    .ifBlank { "${targetInput.subject.take(65)} (from ${targetInput.sender.take(40)})" }
+
+                resultMap[targetInput.id] = EmailClassificationDecision(
+                    priority = prio,
+                    reason = why,
+                    isActionable = prio == "HIGH" || cat in setOf("INVOICE", "MEETING", "TASK"),
+                    category = cat,
+                    extractedTaskTitle = taskTitle
+                )
+            }
+            resultMap
+        } catch (e: Exception) {
+            Log.w(TAG, "Batch AI email classification failed; falling back to offline rules: ${e.message}")
+            emptyMap()
+        }
     }
 
     suspend fun analyzeEmailForTaskOrInvoice(

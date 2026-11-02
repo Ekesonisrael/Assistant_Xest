@@ -53,6 +53,7 @@ import com.xestlab.assistant.service.WakeWordService
 import com.xestlab.assistant.ui.screens.HomeScreen
 import com.xestlab.assistant.ui.screens.NotesScreen
 import com.xestlab.assistant.ui.screens.PlanScreen
+import com.xestlab.assistant.ui.screens.PrioritySendersScreen
 import com.xestlab.assistant.ui.screens.SettingsScreen
 import com.xestlab.assistant.ui.screens.SetupScreen
 import com.xestlab.assistant.ui.theme.BgDark
@@ -127,6 +128,7 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
 
     var currentTab by rememberSaveable { mutableIntStateOf(0) }
     var showSetupOverlay by rememberSaveable { mutableStateOf(false) }
+    var showPriorityRulesOverlay by rememberSaveable { mutableStateOf(false) }
 
     val prefs = loadedPrefs
     if (prefs == null) {
@@ -151,6 +153,14 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
             viewModel = viewModel,
             isReopenedFromSettings = true,
             onClose = { showSetupOverlay = false }
+        )
+        return
+    }
+
+    if (showPriorityRulesOverlay) {
+        PrioritySendersScreen(
+            viewModel = viewModel,
+            onClose = { showPriorityRulesOverlay = false }
         )
         return
     }
@@ -245,7 +255,8 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
                     2 -> NotesScreen(viewModel = viewModel)
                     3 -> SettingsScreen(
                         viewModel = viewModel,
-                        onOpenSetup = { showSetupOverlay = true }
+                        onOpenSetup = { showSetupOverlay = true },
+                        onOpenPriorityRules = { showPriorityRulesOverlay = true }
                     )
                 }
             }

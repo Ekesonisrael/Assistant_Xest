@@ -7,7 +7,9 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.xestlab.assistant.data.model.ChecklistItem
 import com.xestlab.assistant.data.model.ConversationTurn
+import com.xestlab.assistant.data.model.CustomEmailTagEntity
 import com.xestlab.assistant.data.model.DailyLog
+import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
@@ -198,14 +200,20 @@ interface ConversationDao {
 
 @Dao
 interface EmailDao {
-    @Query("SELECT * FROM unread_emails ORDER BY receivedAt DESC LIMIT 25")
+    @Query("SELECT * FROM unread_emails ORDER BY receivedAt DESC LIMIT 100")
     fun observeRecentUnread(): Flow<List<UnreadEmailEntity>>
 
     @Query("SELECT * FROM unread_emails ORDER BY receivedAt DESC LIMIT :limit")
-    suspend fun getRecentUnreadDirect(limit: Int = 25): List<UnreadEmailEntity>
+    suspend fun getRecentUnreadDirect(limit: Int = 100): List<UnreadEmailEntity>
+
+    @Query("SELECT * FROM unread_emails WHERE dismissedInApp = 0 ORDER BY receivedAt DESC LIMIT :limit")
+    suspend fun getActiveUnreadDirect(limit: Int = 100): List<UnreadEmailEntity>
 
     @Query("SELECT * FROM unread_emails WHERE id = :id LIMIT 1")
     suspend fun getEmailById(id: String): UnreadEmailEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertEmail(email: UnreadEmailEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertEmails(emails: List<UnreadEmailEntity>)
@@ -216,9 +224,56 @@ interface EmailDao {
     @Query("UPDATE unread_emails SET notified = 1 WHERE id = :id")
     suspend fun markNotified(id: String)
 
+    @Query("UPDATE unread_emails SET dismissedInApp = 1 WHERE id = :id")
+    suspend fun markDismissedInApp(id: String)
+
+    @Query("UPDATE unread_emails SET reminderCreated = 1 WHERE id = :id")
+    suspend fun markReminderCreated(id: String)
+
+    @Query("UPDATE unread_emails SET tagsCsv = :tagsCsv, priority = :priority, priorityReason = :priorityReason WHERE id = :id")
+    suspend fun updateEmailTagsAndPriority(
+        id: String,
+        tagsCsv: String,
+        priority: String,
+        priorityReason: String
+    )
+
     @Query("DELETE FROM unread_emails WHERE id NOT IN (:activeIds)")
     suspend fun pruneSyncedUnread(activeIds: List<String>)
 
     @Query("DELETE FROM unread_emails")
     suspend fun clearAllEmails()
+}
+
+@Dao
+interface EmailRuleDao {
+    @Query("SELECT * FROM email_sender_rules ORDER BY updatedAt DESC")
+    fun observeSenderRules(): Flow<List<EmailSenderRuleEntity>>
+
+    @Query("SELECT * FROM email_sender_rules ORDER BY updatedAt DESC")
+    suspend fun getAllSenderRulesDirect(): List<EmailSenderRuleEntity>
+
+    @Query("SELECT * FROM email_sender_rules WHERE senderKey = :senderKey LIMIT 1")
+    suspend fun getSenderRule(senderKey: String): EmailSenderRuleEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSenderRule(rule: EmailSenderRuleEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSenderRules(rules: List<EmailSenderRuleEntity>)
+
+    @Query("DELETE FROM email_sender_rules WHERE senderKey = :senderKey")
+    suspend fun deleteSenderRule(senderKey: String)
+
+    @Query("SELECT * FROM email_custom_tags ORDER BY createdAt ASC")
+    fun observeCustomTags(): Flow<List<CustomEmailTagEntity>>
+
+    @Query("SELECT * FROM email_custom_tags ORDER BY createdAt ASC")
+    suspend fun getAllCustomTagsDirect(): List<CustomEmailTagEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCustomTag(tag: CustomEmailTagEntity)
+
+    @Query("DELETE FROM email_custom_tags WHERE tagName = :tagName")
+    suspend fun deleteCustomTag(tagName: String)
 }

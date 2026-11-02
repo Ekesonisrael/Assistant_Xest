@@ -5,19 +5,21 @@ import com.xestlab.assistant.data.WebTrackerImporter
 import com.xestlab.assistant.data.local.AppDatabase
 import com.xestlab.assistant.data.model.ChecklistItem
 import com.xestlab.assistant.data.model.ConversationTurn
+import com.xestlab.assistant.data.model.CustomEmailTagEntity
 import com.xestlab.assistant.data.model.DailyLog
+import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.ReminderSchedule
 import com.xestlab.assistant.data.model.UnreadEmailEntity
+import com.xestlab.assistant.data.model.learnedKeywordsList
+import com.xestlab.assistant.data.model.tagsList
+import com.xestlab.assistant.service.EmailPriorityEngine
 import com.xestlab.assistant.service.TtsGreetingHelper
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
 import java.util.Locale
 
 data class WeeklySummaryData(
@@ -44,6 +46,8 @@ class AssistantRepository(
     val allFacts: Flow<List<Fact>> = db.factDao().observeAllFacts()
     val conversationTurns: Flow<List<ConversationTurn>> = db.conversationDao().observeTurns()
     val unreadEmails: Flow<List<UnreadEmailEntity>> = db.emailDao().observeRecentUnread()
+    val senderRules: Flow<List<EmailSenderRuleEntity>> = db.emailRuleDao().observeSenderRules()
+    val customEmailTags: Flow<List<CustomEmailTagEntity>> = db.emailRuleDao().observeCustomTags()
 
     fun getLogsForDate(date: String): Flow<List<DailyLog>> =
         db.dailyLogDao().observeLogsForDate(date)
@@ -119,41 +123,218 @@ class AssistantRepository(
             )
         )
         db.emailDao().markAddedToTasks(email.id)
+        EmailPriorityEngine.learnPositiveInteraction(
+            db = db,
+            senderDisplay = email.sender,
+            senderAddress = email.senderAddress,
+            subject = email.subject,
+            snippet = email.snippet
+        )
         return id
     }
 
-    suspend fun buildUnreadEmailSpokenSummary(): String {
-        val allCached = db.emailDao().getRecentUnreadDirect(20)
-        if (allCached.isEmpty()) {
-            return "You have no unread emails cached right now. If IMAP is enabled in Settings, tap Sync Now or wait for the next 30-minute check."
-        }
+    suspend fun toggleEmailTag(email: UnreadEmailEntity, rawTag: String) {
+        val cleanTag = rawTag.trim().replace(",", " ")
+        if (cleanTag.isEmpty()) return
 
-        val cal = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }
-        val todayStart = cal.timeInMillis
-        val todaysEmails = allCached.filter { it.receivedAt >= todayStart }
-        val targetList = if (todaysEmails.isNotEmpty()) todaysEmails else allCached
+        val currentTags = email.tagsList.toMutableList()
+        val existingIdx = currentTags.indexOfFirst { it.equals(cleanTag, ignoreCase = true) }
+        val isRemoving = existingIdx >= 0
 
-        val header = if (todaysEmails.isNotEmpty()) {
-            "You received ${todaysEmails.size} unread ${if (todaysEmails.size == 1) "email" else "emails"} today. "
+        if (isRemoving) {
+            currentTags.removeAt(existingIdx)
         } else {
-            "No new unread emails arrived today, but you have ${allCached.size} unread in your inbox. "
+            currentTags.add(cleanTag)
+        }
+        val updatedCsv = EmailPriorityEngine.serializeTags(currentTags)
+
+        if (!isRemoving && cleanTag.equals("Low", ignoreCase = true)) {
+            db.emailDao().updateEmailTagsAndPriority(
+                id = email.id,
+                tagsCsv = updatedCsv,
+                priority = "LOW",
+                priorityReason = "Tagged Low by you"
+            )
+        } else if (!isRemoving) {
+            db.emailDao().updateEmailTagsAndPriority(
+                id = email.id,
+                tagsCsv = updatedCsv,
+                priority = "HIGH",
+                priorityReason = "Tagged '$cleanTag' by you"
+            )
+            EmailPriorityEngine.learnPositiveInteraction(
+                db = db,
+                senderDisplay = email.sender,
+                senderAddress = email.senderAddress,
+                subject = email.subject,
+                snippet = email.snippet
+            )
+        } else {
+            db.emailDao().updateEmailTagsAndPriority(
+                id = email.id,
+                tagsCsv = updatedCsv,
+                priority = email.priority,
+                priorityReason = email.priorityReason
+            )
+            EmailPriorityEngine.recalculateCachedEmails(db)
+        }
+    }
+
+    suspend fun createAndApplyCustomTag(email: UnreadEmailEntity, rawTag: String): String? {
+        val cleanTag = rawTag.trim().replace(",", " ")
+        if (cleanTag.isEmpty()) return null
+        val isBuiltIn = EmailPriorityEngine.BUILT_IN_TAGS.any { it.equals(cleanTag, ignoreCase = true) }
+        if (!isBuiltIn) {
+            db.emailRuleDao().insertCustomTag(CustomEmailTagEntity(tagName = cleanTag))
+        }
+        toggleEmailTag(email, cleanTag)
+        return cleanTag
+    }
+
+    suspend fun deleteCustomEmailTag(tagName: String) {
+        db.emailRuleDao().deleteCustomTag(tagName)
+    }
+
+    /**
+     * Toggles whether this email's sender is explicitly marked as a Priority (HIGH) sender.
+     * @return true if the sender is now marked HIGH priority, false if reset to AUTO.
+     */
+    suspend fun togglePrioritySender(email: UnreadEmailEntity): Boolean {
+        val key = EmailPriorityEngine.normalizeSenderKey(email.senderAddress, email.sender)
+        if (key.isBlank()) return false
+        val existing = db.emailRuleDao().getSenderRule(key)
+        val newOverride = if (existing?.priorityOverride == "HIGH") "AUTO" else "HIGH"
+        val updated = EmailSenderRuleEntity(
+            senderKey = key,
+            senderAddress = email.senderAddress.ifBlank { existing?.senderAddress.orEmpty() },
+            senderDisplayName = email.sender.ifBlank { existing?.senderDisplayName.orEmpty() },
+            priorityOverride = newOverride,
+            dismissCount = if (newOverride == "HIGH") 0 else (existing?.dismissCount ?: 0),
+            positiveCount = existing?.positiveCount ?: 0,
+            learnedKeywordsCsv = existing?.learnedKeywordsCsv.orEmpty(),
+            hasEmailedBefore = existing?.hasEmailedBefore ?: false,
+            updatedAt = System.currentTimeMillis()
+        )
+        db.emailRuleDao().upsertSenderRule(updated)
+        EmailPriorityEngine.recalculateCachedEmails(db)
+        return newOverride == "HIGH"
+    }
+
+    /**
+     * Dismisses an email card ONLY inside the app (never marks, moves, or deletes on IMAP).
+     * Lowers the sender to LOW if 3 emails from the same sender have been dismissed.
+     */
+    suspend fun dismissEmailInApp(email: UnreadEmailEntity): Boolean {
+        return EmailPriorityEngine.recordDismissalInAppOnly(db, email)
+    }
+
+    suspend fun markEmailReminderCreated(emailId: String) {
+        db.emailDao().markReminderCreated(emailId)
+    }
+
+    suspend fun saveOrUpdateSenderRule(
+        senderInput: String,
+        displayNameInput: String,
+        priorityOverride: String
+    ) {
+        val cleanInput = senderInput.trim()
+        if (cleanInput.isBlank()) return
+        val extractedAddr = EmailPriorityEngine.extractEmailAddress(cleanInput)
+        val key = EmailPriorityEngine.normalizeSenderKey(extractedAddr, cleanInput)
+        if (key.isBlank()) return
+        val existing = db.emailRuleDao().getSenderRule(key)
+        val normalizedPriority = priorityOverride.uppercase(Locale.US).let {
+            if (it in setOf("HIGH", "NORMAL", "LOW", "AUTO")) it else "HIGH"
+        }
+        val rule = EmailSenderRuleEntity(
+            senderKey = key,
+            senderAddress = extractedAddr.ifBlank { existing?.senderAddress.orEmpty() },
+            senderDisplayName = displayNameInput.trim().ifBlank {
+                existing?.senderDisplayName?.ifBlank { cleanInput } ?: cleanInput
+            },
+            priorityOverride = normalizedPriority,
+            dismissCount = if (normalizedPriority == "LOW") maxOf(existing?.dismissCount ?: 0, 0) else 0,
+            positiveCount = existing?.positiveCount ?: 0,
+            learnedKeywordsCsv = existing?.learnedKeywordsCsv.orEmpty(),
+            hasEmailedBefore = existing?.hasEmailedBefore ?: false,
+            updatedAt = System.currentTimeMillis()
+        )
+        db.emailRuleDao().upsertSenderRule(rule)
+        EmailPriorityEngine.recalculateCachedEmails(db)
+    }
+
+    suspend fun updateSenderRulePriority(rule: EmailSenderRuleEntity, priorityOverride: String) {
+        val normalized = priorityOverride.uppercase(Locale.US)
+        val updated = rule.copy(
+            priorityOverride = normalized,
+            dismissCount = if (normalized == "HIGH" || normalized == "NORMAL") 0 else rule.dismissCount,
+            updatedAt = System.currentTimeMillis()
+        )
+        db.emailRuleDao().upsertSenderRule(updated)
+        EmailPriorityEngine.recalculateCachedEmails(db)
+    }
+
+    suspend fun deleteSenderRule(rule: EmailSenderRuleEntity) {
+        db.emailRuleDao().deleteSenderRule(rule.senderKey)
+        EmailPriorityEngine.recalculateCachedEmails(db)
+    }
+
+    suspend fun removeKeywordFromSenderRule(rule: EmailSenderRuleEntity, keyword: String) {
+        val remaining = rule.learnedKeywordsList.filterNot { it.equals(keyword, ignoreCase = true) }
+        db.emailRuleDao().upsertSenderRule(
+            rule.copy(
+                learnedKeywordsCsv = remaining.joinToString(","),
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        EmailPriorityEngine.recalculateCachedEmails(db)
+    }
+
+    suspend fun clearKeywordsOnSenderRule(rule: EmailSenderRuleEntity) {
+        db.emailRuleDao().upsertSenderRule(
+            rule.copy(
+                learnedKeywordsCsv = "",
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        EmailPriorityEngine.recalculateCachedEmails(db)
+    }
+
+    /**
+     * Spoken email summary: reads High priority unread emails first, then states the count of the rest.
+     */
+    suspend fun buildUnreadEmailSpokenSummary(): String {
+        val activeUnread = db.emailDao().getActiveUnreadDirect(100)
+        if (activeUnread.isEmpty()) {
+            return "You have no unread emails right now. If IMAP is enabled in Settings, tap Check Now or wait for the next 30-minute check."
         }
 
-        val subjectsText = targetList.take(5).mapIndexed { index, email ->
-            val tag = when (email.category) {
-                "INVOICE" -> "Invoice from ${email.sender}"
-                "TASK" -> "Action item from ${email.sender}"
-                else -> "From ${email.sender}"
-            }
-            "${index + 1}: $tag, subject: ${email.subject}"
-        }.joinToString(". ")
+        val highEmails = activeUnread
+            .filter { it.priority == "HIGH" }
+            .sortedByDescending { it.receivedAt }
+        val normalCount = activeUnread.count { it.priority == "NORMAL" }
+        val lowCount = activeUnread.count { it.priority == "LOW" }
+        val restCount = normalCount + lowCount
 
-        return "$header$subjectsText."
+        return if (highEmails.isNotEmpty()) {
+            val highHeader = "You have ${highEmails.size} high-priority unread ${if (highEmails.size == 1) "email" else "emails"}. "
+            val highReadout = highEmails.take(5).mapIndexed { index, email ->
+                "${index + 1}: From ${email.sender}, subject: ${email.subject}"
+            }.joinToString(". ")
+            val moreHigh = if (highEmails.size > 5) {
+                ", plus ${highEmails.size - 5} more high-priority"
+            } else {
+                ""
+            }
+            val restTail = if (restCount > 0) {
+                " You also have $restCount other unread ${if (restCount == 1) "email" else "emails"} ($normalCount normal and $lowCount low priority)."
+            } else {
+                ""
+            }
+            "$highHeader$highReadout$moreHigh.$restTail"
+        } else {
+            "You have no high-priority unread emails, and $restCount other unread ${if (restCount == 1) "email" else "emails"} ($normalCount normal and $lowCount low priority)."
+        }
     }
 
     suspend fun getWeeklySummary(weekStart: String, weekEnd: String): WeeklySummaryData {

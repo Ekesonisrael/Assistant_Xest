@@ -6,9 +6,13 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import com.xestlab.assistant.MainActivity
+import com.xestlab.assistant.data.SecurePreferences
 import com.xestlab.assistant.data.UserPreferencesState
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.ReminderSchedule
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.Calendar
 import java.util.Locale
 
@@ -24,6 +28,72 @@ object AlarmScheduler {
 
     private const val WAKE_UP_REQUEST_CODE = 9001
     private const val TEST_ALARM_REQUEST_CODE = 9999
+
+    private val _lastAlarmFiredAtFlow = MutableStateFlow(0L)
+    val lastAlarmFiredAtFlow: StateFlow<Long> = _lastAlarmFiredAtFlow.asStateFlow()
+
+    private val _lastAlarmFiredTitleFlow = MutableStateFlow("")
+    val lastAlarmFiredTitleFlow: StateFlow<String> = _lastAlarmFiredTitleFlow.asStateFlow()
+
+    private val _nextAlarmAtFlow = MutableStateFlow(0L)
+    val nextAlarmAtFlow: StateFlow<Long> = _nextAlarmAtFlow.asStateFlow()
+
+    private val _nextAlarmTitleFlow = MutableStateFlow("")
+    val nextAlarmTitleFlow: StateFlow<String> = _nextAlarmTitleFlow.asStateFlow()
+
+    fun syncAlarmTelemetry(context: Context) {
+        val securePrefs = SecurePreferences(context.applicationContext)
+        _lastAlarmFiredAtFlow.value = securePrefs.lastAlarmFiredTimestamp
+        _lastAlarmFiredTitleFlow.value = securePrefs.lastAlarmFiredTitle
+
+        val now = System.currentTimeMillis()
+        var nextTs = securePrefs.nextAlarmTimestamp
+        var nextLabel = securePrefs.nextAlarmTitle
+
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val systemClockNext = try {
+            alarmManager.nextAlarmClock?.triggerTime ?: 0L
+        } catch (_: Exception) {
+            0L
+        }
+
+        if (nextTs <= now && systemClockNext > now) {
+            nextTs = systemClockNext
+            if (nextLabel.isBlank()) nextLabel = "System Alarm Clock"
+        }
+        _nextAlarmAtFlow.value = nextTs
+        _nextAlarmTitleFlow.value = nextLabel
+    }
+
+    fun recordAlarmFired(
+        context: Context,
+        title: String,
+        firedAtMillis: Long = System.currentTimeMillis()
+    ) {
+        val securePrefs = SecurePreferences(context.applicationContext)
+        securePrefs.lastAlarmFiredTimestamp = firedAtMillis
+        securePrefs.lastAlarmFiredTitle = title
+        _lastAlarmFiredAtFlow.value = firedAtMillis
+        _lastAlarmFiredTitleFlow.value = title
+    }
+
+    private fun recordNextCandidate(
+        context: Context,
+        triggerAtMillis: Long,
+        title: String,
+        forceReplace: Boolean = false
+    ) {
+        val now = System.currentTimeMillis()
+        if (triggerAtMillis <= now) return
+        val securePrefs = SecurePreferences(context.applicationContext)
+        val existingNext = securePrefs.nextAlarmTimestamp
+        if (forceReplace || existingNext <= now || triggerAtMillis <= existingNext) {
+            securePrefs.nextAlarmTimestamp = triggerAtMillis
+            securePrefs.nextAlarmTitle = title
+            _nextAlarmAtFlow.value = triggerAtMillis
+            _nextAlarmTitleFlow.value = title
+        }
+    }
 
     fun isWithinQuietHours(
         prefs: UserPreferencesState,
@@ -58,6 +128,12 @@ object AlarmScheduler {
         schedules: List<ReminderSchedule>,
         pendingItems: List<Item>
     ) {
+        val securePrefs = SecurePreferences(context.applicationContext)
+        securePrefs.nextAlarmTimestamp = 0L
+        securePrefs.nextAlarmTitle = ""
+        _nextAlarmAtFlow.value = 0L
+        _nextAlarmTitleFlow.value = ""
+
         val cleanWake = wakeUpTime.trim().ifBlank { "07:30" }
         scheduleWakeUpAlarm(context, cleanWake)
 
@@ -77,6 +153,7 @@ object AlarmScheduler {
                 scheduleItemReminder(context, item)
             }
         }
+        syncAlarmTelemetry(context)
     }
 
     /**
@@ -90,9 +167,10 @@ object AlarmScheduler {
         val minute = mins % 60
 
         val triggerAt = nextOccurrenceMillis(hour, minute, "ALL")
+        val label = "$wakeUpTime Morning Plan"
         val intent = Intent(context, AlarmReceiver::class.java).apply {
             putExtra(EXTRA_ALARM_ID, "wake_up_alarm")
-            putExtra(EXTRA_ALARM_TITLE, "7:30 AM Morning Plan")
+            putExtra(EXTRA_ALARM_TITLE, label)
             putExtra(EXTRA_VOICE_ENABLED, true)
             putExtra(EXTRA_IS_WAKE_UP, true)
         }
@@ -119,6 +197,7 @@ object AlarmScheduler {
         } catch (_: SecurityException) {
             scheduleExactSafe(alarmManager, triggerAt, pendingIntent)
         }
+        recordNextCandidate(context, triggerAt, label)
     }
 
     fun scheduleDailyBriefing(context: Context, schedule: ReminderSchedule) {
@@ -139,6 +218,7 @@ object AlarmScheduler {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         scheduleExactSafe(alarmManager, triggerAt, pendingIntent)
+        recordNextCandidate(context, triggerAt, schedule.title)
     }
 
     fun cancelDailyBriefing(context: Context, scheduleId: String) {
@@ -177,6 +257,7 @@ object AlarmScheduler {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         scheduleExactSafe(alarmManager, dueAt, pendingIntent)
+        recordNextCandidate(context, dueAt, item.title)
     }
 
     fun scheduleSnooze(
@@ -204,6 +285,7 @@ object AlarmScheduler {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         scheduleExactSafe(alarmManager, triggerAt, pendingIntent)
+        recordNextCandidate(context, triggerAt, "Snooze: $title")
     }
 
     fun scheduleOneMinuteTest(context: Context) {
@@ -223,6 +305,7 @@ object AlarmScheduler {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         scheduleExactSafe(alarmManager, triggerAt, pendingIntent)
+        recordNextCandidate(context, triggerAt, "Morning Wake-Up Test")
     }
 
     fun canScheduleExactAlarms(context: Context): Boolean {

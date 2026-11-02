@@ -22,6 +22,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -37,6 +39,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -47,6 +50,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -56,6 +60,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,8 +80,12 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.xestlab.assistant.ai.PlannerProposal
 import com.xestlab.assistant.data.model.ConversationTurn
+import com.xestlab.assistant.data.model.CustomEmailTagEntity
+import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Item
 import com.xestlab.assistant.data.model.UnreadEmailEntity
+import com.xestlab.assistant.data.model.tagsList
+import com.xestlab.assistant.service.EmailPriorityEngine
 import com.xestlab.assistant.service.TtsGreetingHelper
 import com.xestlab.assistant.service.WakeWordService
 import com.xestlab.assistant.ui.theme.BgDark
@@ -110,12 +119,16 @@ fun HomeScreen(viewModel: AssistantViewModel) {
     val activeProposal by viewModel.activeProposal.collectAsState()
     val conversationTurns by viewModel.conversationTurns.collectAsState()
     val unreadEmails by viewModel.unreadEmails.collectAsState()
+    val senderRules by viewModel.senderRules.collectAsState()
+    val customEmailTags by viewModel.customEmailTags.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
     var isListening by remember { mutableStateOf(false) }
     var partialSpeech by remember { mutableStateOf("") }
     var voiceFeedbackError by remember { mutableStateOf<String?>(null) }
     var sentMessageCounter by remember { mutableIntStateOf(0) }
+    var lowPriorityExpanded by rememberSaveable { mutableStateOf(false) }
+    var taggingEmailId by rememberSaveable { mutableStateOf<String?>(null) }
 
     val listState = rememberLazyListState()
     val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
@@ -295,8 +308,33 @@ fun HomeScreen(viewModel: AssistantViewModel) {
     val nextUpItem = remember(pendingItems) {
         pendingItems.firstOrNull { !it.sourceText.startsWith("web_pipeline_") }
     }
-    val actionableEmails = remember(unreadEmails) {
-        unreadEmails.filter { it.isActionable && !it.addedToTasks }.take(3)
+    val visibleEmails = remember(unreadEmails) {
+        unreadEmails.filter { !it.dismissedInApp }
+    }
+    val highEmails = remember(visibleEmails) {
+        visibleEmails.filter { it.priority == "HIGH" }.sortedByDescending { it.receivedAt }
+    }
+    val normalEmails = remember(visibleEmails) {
+        visibleEmails.filter { it.priority == "NORMAL" }.sortedByDescending { it.receivedAt }
+    }
+    val lowEmails = remember(visibleEmails) {
+        visibleEmails.filter { it.priority == "LOW" }.sortedByDescending { it.receivedAt }
+    }
+    val senderRuleMap = remember(senderRules) {
+        senderRules.associateBy { it.senderKey }
+    }
+
+    val activeTagEmail = remember(taggingEmailId, unreadEmails) {
+        taggingEmailId?.let { targetId -> unreadEmails.firstOrNull { it.id == targetId } }
+    }
+    if (activeTagEmail != null) {
+        EmailTagDialog(
+            email = activeTagEmail,
+            customTags = customEmailTags,
+            onToggleTag = { tag -> viewModel.toggleEmailTag(activeTagEmail, tag) },
+            onCreateCustomTag = { customTag -> viewModel.createAndApplyCustomTag(activeTagEmail, customTag) },
+            onDismiss = { taggingEmailId = null }
+        )
     }
 
     Column(
@@ -445,29 +483,128 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 }
             }
 
-            // 4. Smart Email Tasks & Invoices (Add to Tasks)
-            if (actionableEmails.isNotEmpty()) {
+            // 4. Ranked Unread Emails Card (High -> Normal -> Collapsed "Low priority (N)")
+            if (visibleEmails.isNotEmpty()) {
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = CardShape8,
                         colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                        border = BorderStroke(1.dp, TealAccent)
+                        border = BorderStroke(
+                            1.dp,
+                            if (highEmails.isNotEmpty()) TealAccent else BorderDark
+                        )
                     ) {
                         Column(
                             modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Text(
-                                text = "ACTIONABLE UNREAD EMAILS",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = TealAccent
-                            )
-                            actionableEmails.forEach { email ->
-                                ActionableEmailRow(
-                                    email = email,
-                                    onAddToTasks = { viewModel.promoteEmailToTask(email) }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "UNREAD EMAILS (${visibleEmails.size})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TealAccent
                                 )
+                                Text(
+                                    text = "${highEmails.size} High · ${normalEmails.size} Normal · ${lowEmails.size} Low",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TextMutedDark
+                                )
+                            }
+
+                            if (highEmails.isNotEmpty()) {
+                                Text(
+                                    text = "HIGH PRIORITY (${highEmails.size})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TealAccent,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                highEmails.forEach { email ->
+                                    val sKey = EmailPriorityEngine.normalizeSenderKey(email.senderAddress, email.sender)
+                                    val isPrioritySender = senderRuleMap[sKey]?.priorityOverride == "HIGH"
+                                    RankedUnreadEmailCard(
+                                        email = email,
+                                        isPrioritySender = isPrioritySender,
+                                        onAddToTasks = { viewModel.promoteEmailToTask(email) },
+                                        onOpenTagPicker = { taggingEmailId = email.id },
+                                        onTogglePrioritySender = { viewModel.togglePrioritySender(email) },
+                                        onDismissInApp = { viewModel.dismissEmailInAppOnly(email) },
+                                        onSchedule30MinReminder = { viewModel.scheduleEmail30MinReminder(email) }
+                                    )
+                                }
+                            }
+
+                            if (normalEmails.isNotEmpty()) {
+                                Text(
+                                    text = "NORMAL (${normalEmails.size})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TextPrimaryDark,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                normalEmails.forEach { email ->
+                                    val sKey = EmailPriorityEngine.normalizeSenderKey(email.senderAddress, email.sender)
+                                    val isPrioritySender = senderRuleMap[sKey]?.priorityOverride == "HIGH"
+                                    RankedUnreadEmailCard(
+                                        email = email,
+                                        isPrioritySender = isPrioritySender,
+                                        onAddToTasks = { viewModel.promoteEmailToTask(email) },
+                                        onOpenTagPicker = { taggingEmailId = email.id },
+                                        onTogglePrioritySender = { viewModel.togglePrioritySender(email) },
+                                        onDismissInApp = { viewModel.dismissEmailInAppOnly(email) },
+                                        onSchedule30MinReminder = { viewModel.scheduleEmail30MinReminder(email) }
+                                    )
+                                }
+                            }
+
+                            if (lowEmails.isNotEmpty()) {
+                                Surface(
+                                    color = SurfaceSubtleDark,
+                                    shape = CardShape8,
+                                    border = BorderStroke(1.dp, BorderDark),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { lowPriorityExpanded = !lowPriorityExpanded }
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Low priority (${lowEmails.size})",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = TextMutedDark
+                                        )
+                                        Text(
+                                            text = if (lowPriorityExpanded) "Collapse ▲" else "Expand ▼",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = TealAccent
+                                        )
+                                    }
+                                }
+
+                                if (lowPriorityExpanded) {
+                                    lowEmails.forEach { email ->
+                                        val sKey = EmailPriorityEngine.normalizeSenderKey(email.senderAddress, email.sender)
+                                        val isPrioritySender = senderRuleMap[sKey]?.priorityOverride == "HIGH"
+                                        RankedUnreadEmailCard(
+                                            email = email,
+                                            isPrioritySender = isPrioritySender,
+                                            onAddToTasks = { viewModel.promoteEmailToTask(email) },
+                                            onOpenTagPicker = { taggingEmailId = email.id },
+                                            onTogglePrioritySender = { viewModel.togglePrioritySender(email) },
+                                            onDismissInApp = { viewModel.dismissEmailInAppOnly(email) },
+                                            onSchedule30MinReminder = { viewModel.scheduleEmail30MinReminder(email) }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -755,51 +892,354 @@ private fun MicrophoneVectorIcon(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ActionableEmailRow(
+private fun RankedUnreadEmailCard(
     email: UnreadEmailEntity,
-    onAddToTasks: () -> Unit
+    isPrioritySender: Boolean,
+    onAddToTasks: () -> Unit,
+    onOpenTagPicker: () -> Unit,
+    onTogglePrioritySender: () -> Unit,
+    onDismissInApp: () -> Unit,
+    onSchedule30MinReminder: () -> Unit
 ) {
+    val priorityBadgeColor = when (email.priority) {
+        "HIGH" -> TealAccent
+        "LOW" -> TextMutedDark
+        else -> TextPrimaryDark
+    }
+    val receivedLabel = remember(email.receivedAt) {
+        SimpleDateFormat("d MMM h:mm a", Locale.getDefault()).format(Date(email.receivedAt))
+    }
+    val tags = email.tagsList
+    val hasInviteOrDateTime = email.isCalendarInvite || email.eventTimeMillis != null
+    val formattedEventTime = remember(email.eventTimeMillis) {
+        email.eventTimeMillis?.let {
+            SimpleDateFormat("EEE d MMM h:mm a", Locale.getDefault()).format(Date(it))
+        }
+    }
+
     Surface(
         color = SurfaceSubtleDark,
         shape = CardShape8,
-        border = BorderStroke(1.dp, BorderDark),
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (email.priority == "HIGH") TealAccent.copy(alpha = 0.7f) else BorderDark
+        ),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(end = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Surface(
+                        color = if (email.priority == "HIGH") TealAccentContainer else BgDark,
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, priorityBadgeColor)
+                    ) {
+                        Text(
+                            text = email.priority,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = priorityBadgeColor,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                    Text(
+                        text = email.sender,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TealAccent,
+                        maxLines = 1
+                    )
+                }
                 Text(
-                    text = "${email.category} - ${email.sender}",
+                    text = receivedLabel,
                     style = MaterialTheme.typography.labelMedium,
-                    color = TealAccent
-                )
-                Text(
-                    text = email.extractedTaskTitle ?: email.subject,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium
+                    color = TextMutedDark
                 )
             }
-            Button(
-                onClick = onAddToTasks,
-                shape = CardShape8,
-                colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+
+            Text(
+                text = email.subject,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = TextPrimaryDark
+            )
+
+            if (email.snippet.isNotBlank()) {
+                Text(
+                    text = email.snippet,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextMutedDark,
+                    maxLines = 2
+                )
+            }
+
+            // Short single-line "Why this priority"
+            Text(
+                text = "Why this priority: ${email.priorityReason.ifBlank { "Standard unread message" }}",
+                style = MaterialTheme.typography.labelMedium,
+                color = if (email.priority == "HIGH") TealAccent else TextMutedDark,
+                maxLines = 1
+            )
+
+            if (tags.isNotEmpty()) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    tags.forEach { tag ->
+                        Surface(
+                            color = TealAccentContainer,
+                            shape = CardShape8,
+                            border = BorderStroke(1.dp, TealAccent)
+                        ) {
+                            Text(
+                                text = "#$tag",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = TealAccent,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Offer "Remind me 30 minutes before" when email contains a date+time or calendar invite
+            if (hasInviteOrDateTime) {
+                val buttonText = when {
+                    email.reminderCreated -> "Reminder set (30m before${formattedEventTime?.let { " $it" }.orEmpty()}) ✓"
+                    formattedEventTime != null -> "Remind me 30 minutes before ($formattedEventTime)"
+                    else -> "Remind me 30 minutes before (Calendar invite)"
+                }
+                OutlinedButton(
+                    onClick = onSchedule30MinReminder,
+                    enabled = !email.reminderCreated,
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, TealAccent),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = buttonText,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (email.reminderCreated) TextMutedDark else TealAccent
+                    )
+                }
+            }
+
+            // 4 Actions on every email (including Low): Add to Tasks, Tag, Priority sender, Dismiss
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("Add to Tasks", color = BgDark, fontWeight = FontWeight.SemiBold)
+                Button(
+                    onClick = onAddToTasks,
+                    enabled = !email.addedToTasks,
+                    shape = CardShape8,
+                    colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = if (email.addedToTasks) "Added to Tasks ✓" else "Add to Tasks",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (email.addedToTasks) TextMutedDark else BgDark,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onOpenTagPicker,
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, TealAccent),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = if (tags.isEmpty()) "Tag" else "Tag (${tags.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TealAccent
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onTogglePrioritySender,
+                    shape = CardShape8,
+                    border = BorderStroke(
+                        1.dp,
+                        if (isPrioritySender) TealAccent else BorderDark
+                    ),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = if (isPrioritySender) "Priority sender ✓" else "Priority sender",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (isPrioritySender) TealAccent else TextPrimaryDark
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onDismissInApp,
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, BorderDark),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = "Dismiss",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextMutedDark
+                    )
+                }
             }
         }
     }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun EmailTagDialog(
+    email: UnreadEmailEntity,
+    customTags: List<CustomEmailTagEntity>,
+    onToggleTag: (String) -> Unit,
+    onCreateCustomTag: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var customTagDraft by remember { mutableStateOf("") }
+    val activeTags = email.tagsList
+    val allAvailableTags = remember(customTags) {
+        val builtIn = EmailPriorityEngine.BUILT_IN_TAGS
+        val extra = customTags.map { it.tagName }.filter { custom ->
+            builtIn.none { it.equals(custom, ignoreCase = true) }
+        }
+        builtIn + extra
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceDark,
+        title = {
+            Text(
+                text = "Tag Email",
+                style = MaterialTheme.typography.titleMedium,
+                color = TextPrimaryDark
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = email.subject,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextMutedDark,
+                    maxLines = 2
+                )
+                Text(
+                    text = "Tap to toggle tags (tagging raises sender priority & remembers keywords; 'Low' marks email Low):",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextMutedDark
+                )
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    allAvailableTags.forEach { tag ->
+                        val isSelected = activeTags.any { it.equals(tag, ignoreCase = true) }
+                        if (isSelected) {
+                            Button(
+                                onClick = { onToggleTag(tag) },
+                                shape = CardShape8,
+                                colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "$tag ✓",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = BgDark,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = { onToggleTag(tag) },
+                                shape = CardShape8,
+                                border = BorderStroke(1.dp, BorderDark),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = tag,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TextPrimaryDark
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = customTagDraft,
+                        onValueChange = { customTagDraft = it },
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimaryDark),
+                        placeholder = { Text("Create custom tag...", color = TextMutedDark) },
+                        singleLine = true,
+                        shape = CardShape8,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = TealAccent,
+                            unfocusedBorderColor = BorderDark,
+                            focusedTextColor = TextPrimaryDark,
+                            unfocusedTextColor = TextPrimaryDark,
+                            focusedContainerColor = SurfaceSubtleDark,
+                            unfocusedContainerColor = SurfaceSubtleDark,
+                            cursorColor = TealAccent
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Button(
+                        onClick = {
+                            val trimmed = customTagDraft.trim()
+                            if (trimmed.isNotEmpty()) {
+                                onCreateCustomTag(trimmed)
+                                customTagDraft = ""
+                            }
+                        },
+                        shape = CardShape8,
+                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
+                    ) {
+                        Text("Add", color = BgDark, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Done", color = TealAccent)
+            }
+        }
+    )
 }
 
 @Composable

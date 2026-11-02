@@ -793,20 +793,16 @@ class WakeWordService : Service() {
                         if (securePrefs.isImapEnabled &&
                             securePrefs.imapUser.isNotBlank() &&
                             securePrefs.imapPassword.isNotBlank() &&
-                            db.emailDao().getRecentUnreadDirect(1).isEmpty()
+                            db.emailDao().getActiveUnreadDirect(1).isEmpty()
                         ) {
                             EmailHelper.syncUnreadEmailsAndNotify(
                                 applicationContext,
                                 postNotifications = false
                             )
                         }
-                        if (securePrefs.hasGroqKey()) {
-                            askGroqForSpokenReply(spokenCommand, userPrefs)
-                        } else {
-                            val emailSummary = repository.buildUnreadEmailSpokenSummary()
-                            repository.recordTurn("ASSISTANT", emailSummary)
-                            emailSummary
-                        }
+                        val emailSummary = repository.buildUnreadEmailSpokenSummary()
+                        repository.recordTurn("ASSISTANT", emailSummary)
+                        emailSummary
                     }
 
                     else -> {

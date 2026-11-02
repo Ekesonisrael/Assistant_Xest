@@ -116,9 +116,47 @@ data class UnreadEmailEntity(
     val snippet: String = "",
     val receivedAt: Long = System.currentTimeMillis(),
     val isActionable: Boolean = false,
-    val category: String = "GENERAL", // "TASK", "INVOICE", "GENERAL"
+    val category: String = "GENERAL", // "TASK", "INVOICE", "MEETING", "GENERAL"
     val extractedTaskTitle: String? = null,
     val addedToTasks: Boolean = false,
     val notified: Boolean = false,
-    val fetchedAt: Long = System.currentTimeMillis()
+    val fetchedAt: Long = System.currentTimeMillis(),
+    val senderAddress: String = "",
+    val priority: String = "NORMAL", // "HIGH", "NORMAL", "LOW"
+    val priorityReason: String = "",
+    val tagsCsv: String = "",
+    val dismissedInApp: Boolean = false,
+    val hasUnsubscribeOrNoReply: Boolean = false,
+    val isCalendarInvite: Boolean = false,
+    val eventTimeMillis: Long? = null,
+    val reminderCreated: Boolean = false
+)
+
+val UnreadEmailEntity.tagsList: List<String>
+    get() = tagsCsv.split(",")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+
+@Entity(tableName = "email_sender_rules")
+data class EmailSenderRuleEntity(
+    @PrimaryKey val senderKey: String,
+    val senderAddress: String = "",
+    val senderDisplayName: String = "",
+    val priorityOverride: String = "AUTO", // "HIGH", "NORMAL", "LOW", "AUTO"
+    val dismissCount: Int = 0,
+    val positiveCount: Int = 0,
+    val learnedKeywordsCsv: String = "",
+    val hasEmailedBefore: Boolean = false,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+val EmailSenderRuleEntity.learnedKeywordsList: List<String>
+    get() = learnedKeywordsCsv.split(",")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+
+@Entity(tableName = "email_custom_tags")
+data class CustomEmailTagEntity(
+    @PrimaryKey val tagName: String,
+    val createdAt: Long = System.currentTimeMillis()
 )

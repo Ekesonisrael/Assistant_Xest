@@ -208,6 +208,13 @@ class SecurePreferences(context: Context) {
             .commit()
     }
 
+    fun clearElevenLabsPause() {
+        prefs.edit()
+            .putLong("elevenlabs_paused_until_ms", 0L)
+            .putString("elevenlabs_pause_message", "")
+            .commit()
+    }
+
     private fun currentYearMonthKey(nowMillis: Long = System.currentTimeMillis()): String {
         return SimpleDateFormat("yyyy-MM", Locale.US).format(Date(nowMillis))
     }
@@ -292,6 +299,42 @@ class SecurePreferences(context: Context) {
         get() = prefs.getLong("last_email_check_ts", 0L)
         set(value) {
             prefs.edit().putLong("last_email_check_ts", value).commit()
+        }
+
+    var lastEmailCheckResult: String
+        get() = prefs.getString("last_email_check_result", "Never checked") ?: "Never checked"
+        set(value) {
+            prefs.edit().putString("last_email_check_result", value).commit()
+        }
+
+    var lastEmailCheckIsError: Boolean
+        get() = prefs.getBoolean("last_email_check_is_error", false)
+        set(value) {
+            prefs.edit().putBoolean("last_email_check_is_error", value).commit()
+        }
+
+    var lastAlarmFiredTimestamp: Long
+        get() = prefs.getLong("last_alarm_fired_ts", 0L)
+        set(value) {
+            prefs.edit().putLong("last_alarm_fired_ts", value).commit()
+        }
+
+    var lastAlarmFiredTitle: String
+        get() = prefs.getString("last_alarm_fired_title", "") ?: ""
+        set(value) {
+            prefs.edit().putString("last_alarm_fired_title", value).commit()
+        }
+
+    var nextAlarmTimestamp: Long
+        get() = prefs.getLong("next_alarm_scheduled_ts", 0L)
+        set(value) {
+            prefs.edit().putLong("next_alarm_scheduled_ts", value).commit()
+        }
+
+    var nextAlarmTitle: String
+        get() = prefs.getString("next_alarm_scheduled_title", "") ?: ""
+        set(value) {
+            prefs.edit().putString("next_alarm_scheduled_title", value).commit()
         }
 
     // --- Custom Wake Word & Picovoice Porcupine Encrypted Credentials ---

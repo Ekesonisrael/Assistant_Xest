@@ -15,7 +15,9 @@ import com.xestlab.assistant.data.UserPreferencesState
 import com.xestlab.assistant.data.local.AppDatabase
 import com.xestlab.assistant.data.model.ChecklistItem
 import com.xestlab.assistant.data.model.ConversationTurn
+import com.xestlab.assistant.data.model.CustomEmailTagEntity
 import com.xestlab.assistant.data.model.DailyLog
+import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
@@ -115,8 +117,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val wakeWordThreshold: StateFlow<Float> = _wakeWordThreshold.asStateFlow()
 
     val wakeWordDiagnostics: StateFlow<WakeWordDiagnostics> = WakeWordService.diagnosticsFlow
+    val wakeWordIsRunning: StateFlow<Boolean> = WakeWordService.isRunningFlow
     val wakeWordStatusText: StateFlow<String> = WakeWordService.statusMessageFlow
     val wakeWordStatusIsError: StateFlow<Boolean> = WakeWordService.statusIsErrorFlow
+
+    // System Health Telemetry Flows (Alarms & Email)
+    val lastEmailCheckTime: StateFlow<Long> = EmailHelper.lastCheckTimeFlow
+    val lastEmailCheckResult: StateFlow<String> = EmailHelper.lastCheckResultFlow
+    val lastEmailCheckIsError: StateFlow<Boolean> = EmailHelper.lastCheckIsErrorFlow
+    val lastAlarmFiredAt: StateFlow<Long> = AlarmScheduler.lastAlarmFiredAtFlow
+    val lastAlarmFiredTitle: StateFlow<String> = AlarmScheduler.lastAlarmFiredTitleFlow
+    val nextAlarmAt: StateFlow<Long> = AlarmScheduler.nextAlarmAtFlow
+    val nextAlarmTitle: StateFlow<String> = AlarmScheduler.nextAlarmTitleFlow
 
     // ElevenLabs Cloud Voice & Android TTS Fallback Picker State
     private val _savedElevenLabsSummary = MutableStateFlow(securePrefs.maskedElevenLabsKeyPreview())
@@ -177,6 +189,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val unreadEmails: StateFlow<List<UnreadEmailEntity>> = repository.unreadEmails
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val senderRules: StateFlow<List<EmailSenderRuleEntity>> = repository.senderRules
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val customEmailTags: StateFlow<List<CustomEmailTagEntity>> = repository.customEmailTags
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val filteredNotes: StateFlow<List<Item>> = _noteSearchQuery
         .flatMapLatest { query -> repository.searchNotes(query) }
@@ -187,8 +205,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _activeProvider.value = LlmProvider.GROQ
         VoiceEngine.syncPersistedCloudState(securePrefs)
         WakeWordService.syncPersistedDiagnostics(appContext)
+        EmailHelper.syncPersistedHealth(securePrefs)
+        AlarmScheduler.syncAlarmTelemetry(appContext)
         viewModelScope.launch {
             AppDatabase.ensureSeeded(db)
+            val snap = userPreferencesDataStore.getSnapshot()
+            if (snap.isFirstLaunchComplete && securePrefs.nextAlarmTimestamp <= System.currentTimeMillis()) {
+                val schedules = db.reminderDao().getAllRemindersDirect()
+                val pending = db.itemDao().getPendingItemsDirect()
+                AlarmScheduler.scheduleAllActive(appContext, snap.wakeUpTime, schedules, pending)
+            }
             refreshDailyPlanText()
             refreshWeeklySummary()
         }
@@ -318,18 +344,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     if (securePrefs.isImapEnabled &&
                         securePrefs.imapUser.isNotBlank() &&
                         securePrefs.imapPassword.isNotBlank() &&
-                        db.emailDao().getRecentUnreadDirect(1).isEmpty()
+                        db.emailDao().getActiveUnreadDirect(1).isEmpty()
                     ) {
                         _isThinking.value = true
                         EmailHelper.syncUnreadEmailsAndNotify(appContext, postNotifications = false)
                         _isThinking.value = false
                     }
-                    if (securePrefs.hasGroqKey()) {
-                        routeChatToBrainOrOffline(cleaned, prefs)
-                    } else {
-                        val emailSummary = repository.buildUnreadEmailSpokenSummary()
-                        respond(emailSummary, speak = true)
-                    }
+                    val emailSummary = repository.buildUnreadEmailSpokenSummary()
+                    respond(emailSummary, speak = true)
                 }
 
                 is ParsedIntent.ReadPlan -> {
@@ -453,7 +475,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     if (securePrefs.isImapEnabled &&
                         securePrefs.imapUser.isNotBlank() &&
                         securePrefs.imapPassword.isNotBlank() &&
-                        db.emailDao().getRecentUnreadDirect(1).isEmpty() &&
+                        db.emailDao().getActiveUnreadDirect(1).isEmpty() &&
                         (intent.query.contains("meeting", ignoreCase = true) ||
                             intent.query.contains("invite", ignoreCase = true) ||
                             intent.query.contains("email", ignoreCase = true))
@@ -557,8 +579,138 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             repository.promoteEmailToTask(email)
             refreshDailyPlanText()
             val name = prefsState.value.userName.ifBlank { "King Israel" }
-            _statusBanner.value = "Added email to your Tasks."
+            _statusBanner.value = "Added email to Tasks and raised sender priority."
             speakText("Added '${email.extractedTaskTitle ?: email.subject}' to your tasks, $name.")
+        }
+    }
+
+    fun toggleEmailTag(email: UnreadEmailEntity, tag: String) {
+        viewModelScope.launch {
+            repository.toggleEmailTag(email, tag)
+            refreshDailyPlanText()
+            _statusBanner.value = "Updated tag '$tag' on '${email.subject.take(40)}'."
+        }
+    }
+
+    fun createAndApplyCustomTag(email: UnreadEmailEntity, rawTag: String) {
+        val clean = rawTag.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            val savedTag = repository.createAndApplyCustomTag(email, clean)
+            if (savedTag != null) {
+                refreshDailyPlanText()
+                _statusBanner.value = "Created & applied tag '$savedTag' (sender priority updated)."
+            }
+        }
+    }
+
+    fun deleteCustomEmailTag(tagName: String) {
+        viewModelScope.launch {
+            repository.deleteCustomEmailTag(tagName)
+            _statusBanner.value = "Removed custom tag '$tagName'."
+        }
+    }
+
+    fun togglePrioritySender(email: UnreadEmailEntity) {
+        viewModelScope.launch {
+            val isNowPriority = repository.togglePrioritySender(email)
+            refreshDailyPlanText()
+            _statusBanner.value = if (isNowPriority) {
+                "Marked ${email.sender} as a Priority Sender (High)."
+            } else {
+                "Removed manual Priority Sender override for ${email.sender}."
+            }
+        }
+    }
+
+    /**
+     * Hides the email card inside the app ONLY. Never marks, moves, or deletes anything on IMAP.
+     * After 3 dismissals from the same sender, automatically lowers that sender to Low.
+     */
+    fun dismissEmailInAppOnly(email: UnreadEmailEntity) {
+        viewModelScope.launch {
+            val loweredToLow = repository.dismissEmailInApp(email)
+            refreshDailyPlanText()
+            _statusBanner.value = if (loweredToLow) {
+                "Hidden in app only (untouched on mail server). Lowered ${email.sender} to Low after 3 dismissals."
+            } else {
+                "Hidden in app only — never marked, moved, or deleted on mail server."
+            }
+        }
+    }
+
+    fun scheduleEmail30MinReminder(email: UnreadEmailEntity) {
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            val eventMs = email.eventTimeMillis ?: (now + 31 * 60_000L)
+            val rawTrigger = eventMs - 30 * 60_000L
+            val triggerAt = if (rawTrigger <= now + 15_000L) now + 60_000L else rawTrigger
+
+            val eventClock = SimpleDateFormat("EEE d MMM h:mm a", Locale.getDefault()).format(Date(eventMs))
+            val reminderTitle = "In 30m: ${email.subject}"
+            val itemId = repository.saveItem(
+                Item(
+                    type = "REMINDER",
+                    title = reminderTitle,
+                    details = "From ${email.sender} (Event at $eventClock). ${email.snippet}".take(260),
+                    dueAt = triggerAt,
+                    priority = "HIGH",
+                    status = "PENDING",
+                    sourceText = "email_invite_${email.id}"
+                )
+            )
+            val savedItem = db.itemDao().getItemById(itemId)
+            if (savedItem != null) {
+                AlarmScheduler.scheduleItemReminder(appContext, savedItem)
+            }
+            repository.markEmailReminderCreated(email.id)
+            refreshDailyPlanText()
+            val triggerClock = SimpleDateFormat("EEE d MMM h:mm a", Locale.getDefault()).format(Date(triggerAt))
+            _statusBanner.value = "Reminder scheduled for $triggerClock (30m before '${email.subject.take(36)}')."
+        }
+    }
+
+    // --- Priority Senders & Learned Rules Management ---
+
+    fun saveOrUpdateSenderRule(senderInput: String, displayName: String, priority: String) {
+        if (senderInput.isBlank()) return
+        viewModelScope.launch {
+            repository.saveOrUpdateSenderRule(senderInput, displayName, priority)
+            refreshDailyPlanText()
+            _statusBanner.value = "Saved sender rule '$senderInput' -> ${priority.uppercase(Locale.US)}."
+        }
+    }
+
+    fun setSenderRulePriority(rule: EmailSenderRuleEntity, priority: String) {
+        viewModelScope.launch {
+            repository.updateSenderRulePriority(rule, priority)
+            refreshDailyPlanText()
+            val label = rule.senderDisplayName.ifBlank { rule.senderAddress.ifBlank { rule.senderKey } }
+            _statusBanner.value = "Set $label priority to ${priority.uppercase(Locale.US)}."
+        }
+    }
+
+    fun deleteSenderRule(rule: EmailSenderRuleEntity) {
+        viewModelScope.launch {
+            repository.deleteSenderRule(rule)
+            refreshDailyPlanText()
+            val label = rule.senderDisplayName.ifBlank { rule.senderAddress.ifBlank { rule.senderKey } }
+            _statusBanner.value = "Removed learned rule for $label."
+        }
+    }
+
+    fun removeLearnedKeyword(rule: EmailSenderRuleEntity, keyword: String) {
+        viewModelScope.launch {
+            repository.removeKeywordFromSenderRule(rule, keyword)
+            refreshDailyPlanText()
+        }
+    }
+
+    fun clearLearnedKeywords(rule: EmailSenderRuleEntity) {
+        viewModelScope.launch {
+            repository.clearKeywordsOnSenderRule(rule)
+            refreshDailyPlanText()
+            _statusBanner.value = "Cleared learned keywords for ${rule.senderDisplayName.ifBlank { rule.senderKey }}."
         }
     }
 
@@ -774,6 +926,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _wakeWordThreshold.value = securePrefs.wakeWordThreshold
         _selectedAndroidVoiceName.value = securePrefs.androidTtsVoiceName
         VoiceEngine.syncPersistedCloudState(securePrefs)
+        EmailHelper.syncPersistedHealth(securePrefs)
+        AlarmScheduler.syncAlarmTelemetry(appContext)
         voiceEngine.refreshInstalledVoices()
     }
 
@@ -966,10 +1120,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             if (!passDraft.isNullOrBlank()) securePrefs.imapPassword = passDraft
 
             val result = EmailHelper.syncUnreadEmailsAndNotify(appContext, postNotifications = true)
+            refreshDailyPlanText()
             _statusBanner.value = result.fold(
                 onSuccess = { list ->
-                    val actionableCount = list.count { it.isActionable }
-                    "Synced ${list.size} unread emails ($actionableCount actionable tasks/invoices)."
+                    val highCount = list.count { it.priority == "HIGH" && !it.dismissedInApp }
+                    val normalCount = list.count { it.priority == "NORMAL" && !it.dismissedInApp }
+                    val lowCount = list.count { it.priority == "LOW" && !it.dismissedInApp }
+                    "Synced ${list.size} unread (${highCount} High, ${normalCount} Normal, ${lowCount} Low)."
                 },
                 onFailure = { err ->
                     "IMAP sync failed: ${err.message ?: "Check credentials or network"}"
@@ -1023,5 +1180,54 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun testJarvisLoopFromSettings() {
         securePrefs.wakeWordName = "Jarvis"
         WakeWordService.triggerJarvisLoopTest(appContext)
+    }
+
+    // --- System Health One-Tap Fix Helpers ---
+
+    fun rescheduleAllAlarmsNow() {
+        viewModelScope.launch {
+            val prefs = userPreferencesDataStore.getSnapshot()
+            val wake = prefs.wakeUpTime.ifBlank { "07:30" }
+            val schedules = db.reminderDao().getAllRemindersDirect()
+            val pending = db.itemDao().getPendingItemsDirect()
+            AlarmScheduler.scheduleAllActive(appContext, wake, schedules, pending)
+            AlarmScheduler.syncAlarmTelemetry(appContext)
+            _statusBanner.value = "Rescheduled wake-up ($wake), daily briefings, and pending reminders."
+        }
+    }
+
+    fun clearCloudVoicePauseAndTest() {
+        securePrefs.clearElevenLabsPause()
+        VoiceEngine.syncPersistedCloudState(securePrefs)
+        if (securePrefs.hasElevenLabsKey()) {
+            val displayName = prefsState.value.userName.ifBlank { "King Israel" }
+            speakText("${TtsGreetingHelper.getTimeAwareGreeting(displayName)} Cloud voice resumed.")
+            _statusBanner.value = "Cleared 24-hour cloud voice pause and started voice check."
+        } else {
+            VoiceEngine.updateExternalDiagnostic(
+                "Cloud voice pause cleared. Save an ElevenLabs API key or use Android TTS 1.0x.",
+                isError = false
+            )
+            _statusBanner.value = "Cloud voice pause cleared."
+        }
+    }
+
+    fun enableAndSyncImapNow() {
+        if (securePrefs.imapUser.isNotBlank() && securePrefs.imapPassword.isNotBlank()) {
+            securePrefs.isImapEnabled = true
+            EmailHelper.schedulePeriodicChecks(appContext, securePrefs.isImapWifiOnly)
+            syncEmailsNow()
+        } else {
+            _statusBanner.value = "Enter your IMAP email address and app password in Smart Email Checker below."
+        }
+    }
+
+    fun startOrRestartWakeWordFromHealth() {
+        securePrefs.wakeWordName = "Jarvis"
+        securePrefs.isWakeWordEnabled = true
+        _wakeWordEnabledState.value = true
+        WakeWordService.stop(appContext)
+        WakeWordService.start(appContext, initiatedByUserTap = true)
+        _statusBanner.value = "Restarted 'Hey Jarvis' wake-word listener."
     }
 }

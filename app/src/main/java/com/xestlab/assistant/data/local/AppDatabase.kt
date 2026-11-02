@@ -8,7 +8,9 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.xestlab.assistant.data.model.ChecklistItem
 import com.xestlab.assistant.data.model.ConversationTurn
+import com.xestlab.assistant.data.model.CustomEmailTagEntity
 import com.xestlab.assistant.data.model.DailyLog
+import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
@@ -29,9 +31,11 @@ import kotlinx.coroutines.launch
         Item::class,
         Fact::class,
         ConversationTurn::class,
-        UnreadEmailEntity::class
+        UnreadEmailEntity::class,
+        EmailSenderRuleEntity::class,
+        CustomEmailTagEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -45,6 +49,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun factDao(): FactDao
     abstract fun conversationDao(): ConversationDao
     abstract fun emailDao(): EmailDao
+    abstract fun emailRuleDao(): EmailRuleDao
 
     companion object {
         @Volatile
@@ -131,6 +136,59 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `unread_emails` ADD COLUMN `senderAddress` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `unread_emails` ADD COLUMN `priority` TEXT NOT NULL DEFAULT 'NORMAL'")
+                db.execSQL("ALTER TABLE `unread_emails` ADD COLUMN `priorityReason` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `unread_emails` ADD COLUMN `tagsCsv` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `unread_emails` ADD COLUMN `dismissedInApp` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `unread_emails` ADD COLUMN `hasUnsubscribeOrNoReply` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `unread_emails` ADD COLUMN `isCalendarInvite` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `unread_emails` ADD COLUMN `eventTimeMillis` INTEGER")
+                db.execSQL("ALTER TABLE `unread_emails` ADD COLUMN `reminderCreated` INTEGER NOT NULL DEFAULT 0")
+
+                db.execSQL(
+                    """
+                    UPDATE `unread_emails`
+                    SET `priority` = CASE WHEN `isActionable` = 1 THEN 'HIGH' ELSE 'NORMAL' END,
+                        `priorityReason` = CASE
+                            WHEN `category` = 'INVOICE' THEN 'Invoice, payment, or proposal'
+                            WHEN `isActionable` = 1 THEN 'Actionable task or meeting keyword'
+                            ELSE 'Standard unread message'
+                        END
+                    """.trimIndent()
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `email_sender_rules` (
+                        `senderKey` TEXT NOT NULL,
+                        `senderAddress` TEXT NOT NULL,
+                        `senderDisplayName` TEXT NOT NULL,
+                        `priorityOverride` TEXT NOT NULL,
+                        `dismissCount` INTEGER NOT NULL,
+                        `positiveCount` INTEGER NOT NULL,
+                        `learnedKeywordsCsv` TEXT NOT NULL,
+                        `hasEmailedBefore` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`senderKey`)
+                    )
+                    """.trimIndent()
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `email_custom_tags` (
+                        `tagName` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`tagName`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val appContext = context.applicationContext
@@ -139,7 +197,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "xestlab_assistant.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)

@@ -1,15 +1,21 @@
 package com.xestlab.assistant.ui.screens
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.TypedValue
 import android.view.ViewGroup
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -26,6 +32,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.Button
@@ -46,10 +53,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -64,8 +73,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import com.xestlab.assistant.data.LlmProvider
 import com.xestlab.assistant.data.SecurePreferences
+import com.xestlab.assistant.service.AlarmScheduler
 import com.xestlab.assistant.service.WakeWordService
 import com.xestlab.assistant.ui.theme.BgDark
 import com.xestlab.assistant.ui.theme.BorderDark
@@ -89,13 +102,18 @@ import java.util.Locale
 @Composable
 fun SettingsScreen(
     viewModel: AssistantViewModel,
-    onOpenSetup: () -> Unit
+    onOpenSetup: () -> Unit,
+    onOpenPriorityRules: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val settingsListState = rememberLazyListState()
+    val settingsScope = rememberCoroutineScope()
+
     val prefs by viewModel.prefsState.collectAsState()
     val goals by viewModel.goals.collectAsState()
     val reminders by viewModel.reminders.collectAsState()
     val facts by viewModel.allFacts.collectAsState()
+    val senderRules by viewModel.senderRules.collectAsState()
     val aiEnabledState by viewModel.aiEnabledState.collectAsState()
     // Gemini temporarily disabled: val savedGeminiSummary by viewModel.savedGeminiSummary.collectAsState()
     val savedGroqSummary by viewModel.savedGroqSummary.collectAsState()
@@ -104,10 +122,19 @@ fun SettingsScreen(
     val isThinking by viewModel.isThinking.collectAsState()
 
     val wakeWordEnabledState by viewModel.wakeWordEnabledState.collectAsState()
+    val wakeWordIsRunning by viewModel.wakeWordIsRunning.collectAsState()
     val wakeDiagnostics by viewModel.wakeWordDiagnostics.collectAsState()
     val wakeThresholdState by viewModel.wakeWordThreshold.collectAsState()
     val wakeWordStatusText by viewModel.wakeWordStatusText.collectAsState()
     val wakeWordStatusIsError by viewModel.wakeWordStatusIsError.collectAsState()
+
+    val lastEmailCheckTime by viewModel.lastEmailCheckTime.collectAsState()
+    val lastEmailCheckResult by viewModel.lastEmailCheckResult.collectAsState()
+    val lastEmailCheckIsError by viewModel.lastEmailCheckIsError.collectAsState()
+    val lastAlarmFiredAt by viewModel.lastAlarmFiredAt.collectAsState()
+    val lastAlarmFiredTitle by viewModel.lastAlarmFiredTitle.collectAsState()
+    val nextAlarmAt by viewModel.nextAlarmAt.collectAsState()
+    val nextAlarmTitle by viewModel.nextAlarmTitle.collectAsState()
 
     val savedElevenLabsSummary by viewModel.savedElevenLabsSummary.collectAsState()
     val voiceStatusText by viewModel.voiceStatusText.collectAsState()
@@ -119,8 +146,24 @@ fun SettingsScreen(
     val elevenLabsPausedUntil by viewModel.elevenLabsPausedUntil.collectAsState()
     val elevenLabsPauseMessage by viewModel.elevenLabsPauseMessage.collectAsState()
 
+    var healthRefreshTick by remember { mutableIntStateOf(0) }
+
     LaunchedEffect(Unit) {
         viewModel.refreshSavedKeySummaries()
+    }
+
+    DisposableEffect(context) {
+        val lifecycleOwner = context as? LifecycleOwner
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                healthRefreshTick++
+                viewModel.refreshSavedKeySummaries()
+            }
+        }
+        lifecycleOwner?.lifecycle?.addObserver(observer)
+        onDispose {
+            lifecycleOwner?.lifecycle?.removeObserver(observer)
+        }
     }
 
     var nameField by remember(prefs.userName) { mutableStateOf(prefs.userName) }
@@ -218,6 +261,24 @@ fun SettingsScreen(
         }
     }
 
+    val healthNotifLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        healthRefreshTick++
+        if (!granted) {
+            openNotificationSettings(context)
+        }
+    }
+
+    val healthMicLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        healthRefreshTick++
+        if (!granted) {
+            openAppDetailsSettings(context)
+        }
+    }
+
     if (showMemoryDialog) {
         MemoryDialog(
             viewModel = viewModel,
@@ -225,7 +286,34 @@ fun SettingsScreen(
         )
     }
 
+    val notifPermissionOk = remember(healthRefreshTick) {
+        val systemEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        val runtimeGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+        systemEnabled && runtimeGranted
+    }
+    val exactAlarmOk = remember(healthRefreshTick) {
+        AlarmScheduler.canScheduleExactAlarms(context)
+    }
+    val batteryExemptOk = remember(healthRefreshTick) {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        pm.isIgnoringBatteryOptimizations(context.packageName)
+    }
+    val micPermissionOk = remember(healthRefreshTick) {
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
     LazyColumn(
+        state = settingsListState,
         modifier = Modifier
             .fillMaxSize()
             .background(BgDark)
@@ -243,6 +331,205 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextMutedDark
             )
+        }
+
+        // System Health Card (8 Live Checks + One-Tap Fix Buttons)
+        item {
+            SettingsCard(title = "SYSTEM HEALTH") {
+                val nowMs = System.currentTimeMillis()
+
+                // 1. Notification permission
+                HealthCheckRow(
+                    title = "1. Notification Permission",
+                    detail = if (notifPermissionOk) {
+                        "Granted & enabled"
+                    } else {
+                        "Blocked or not granted — alarms and High email alerts cannot show"
+                    },
+                    isProblem = !notifPermissionOk,
+                    fixLabel = "Grant",
+                    onFix = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.POST_NOTIFICATIONS
+                            ) != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            healthNotifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            openNotificationSettings(context)
+                        }
+                    }
+                )
+
+                // 2. Exact alarm permission
+                HealthCheckRow(
+                    title = "2. Exact Alarm Permission",
+                    detail = if (exactAlarmOk) {
+                        "Allowed (exact wake-up & reminder scheduling active)"
+                    } else {
+                        "Not allowed — 7:30 AM wake-up and reminders may be delayed"
+                    },
+                    isProblem = !exactAlarmOk,
+                    fixLabel = "Allow",
+                    onFix = { openExactAlarmSettings(context) }
+                )
+
+                // 3. Battery optimisation exemption
+                HealthCheckRow(
+                    title = "3. Battery Optimisation Exemption",
+                    detail = if (batteryExemptOk) {
+                        "Exempt (Unrestricted background execution)"
+                    } else {
+                        "Optimised — OS may throttle background wake-up or email sync"
+                    },
+                    isProblem = !batteryExemptOk,
+                    fixLabel = "Exempt",
+                    onFix = { openBatteryExemptionPrompt(context) }
+                )
+
+                // 4. Microphone permission
+                HealthCheckRow(
+                    title = "4. Microphone Permission",
+                    detail = if (micPermissionOk) {
+                        "Granted"
+                    } else {
+                        "Not granted — voice input and 'Hey Jarvis' cannot listen"
+                    },
+                    isProblem = !micPermissionOk,
+                    fixLabel = "Grant",
+                    onFix = {
+                        healthMicLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                )
+
+                // 5. Wake-word service state
+                val wakeHasIssue = !wakeWordEnabledState ||
+                    !wakeWordIsRunning ||
+                    wakeDiagnostics.isMicSilentWarning ||
+                    wakeDiagnostics.lastError != "None" ||
+                    wakeWordStatusIsError
+                val wakeHealthDetail = when {
+                    !wakeWordEnabledState -> "Disabled"
+                    !wakeWordIsRunning -> "Stopped (${wakeDiagnostics.serviceState})"
+                    wakeDiagnostics.isMicSilentWarning -> "Running, but mic level has been 0 for 5s"
+                    wakeDiagnostics.lastError != "None" -> "Error: ${wakeDiagnostics.lastError}"
+                    else -> "Active (${wakeDiagnostics.serviceState} · Mic ${wakeDiagnostics.micLevel}/100)"
+                }
+                val wakeFixLabel = when {
+                    !wakeWordEnabledState -> "Enable"
+                    !wakeWordIsRunning -> "Start"
+                    else -> "Restart"
+                }
+                HealthCheckRow(
+                    title = "5. Wake-Word Service State",
+                    detail = wakeHealthDetail,
+                    isProblem = wakeHasIssue,
+                    fixLabel = wakeFixLabel,
+                    onFix = {
+                        if (!micPermissionOk) {
+                            val perms = buildList {
+                                add(Manifest.permission.RECORD_AUDIO)
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    add(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            }
+                            wakePermissionLauncher.launch(perms.toTypedArray())
+                        } else {
+                            wakeWordEnabled = true
+                            viewModel.startOrRestartWakeWordFromHealth()
+                        }
+                    }
+                )
+
+                // 6. Last alarm fired and next alarm time
+                val lastFiredFormatted = if (lastAlarmFiredAt > 0L) {
+                    "${formatHealthTime(lastAlarmFiredAt)} (${lastAlarmFiredTitle.ifBlank { "Alarm" }})"
+                } else {
+                    "None recorded yet"
+                }
+                val hasUpcomingAlarm = nextAlarmAt > nowMs
+                val nextAlarmFormatted = if (hasUpcomingAlarm) {
+                    "${formatHealthTime(nextAlarmAt)} (${nextAlarmTitle.ifBlank { "Scheduled" }})"
+                } else {
+                    "No upcoming alarm scheduled"
+                }
+                HealthCheckRow(
+                    title = "6. Alarms (Last Fired & Next)",
+                    detail = "Last fired: $lastFiredFormatted\nNext alarm: $nextAlarmFormatted",
+                    isProblem = !hasUpcomingAlarm,
+                    fixLabel = "Reschedule",
+                    onFix = { viewModel.rescheduleAllAlarmsNow() }
+                )
+
+                // 7. Last email check time and result
+                val hasImapCreds = viewModel.securePrefs.imapUser.isNotBlank() &&
+                    viewModel.securePrefs.imapPassword.isNotBlank()
+                val emailProblem = !hasImapCreds || !imapEnabled || lastEmailCheckIsError || lastEmailCheckTime == 0L
+                val emailHealthDetail = when {
+                    !hasImapCreds -> "IMAP credentials not configured"
+                    !imapEnabled -> "Background checks paused · Last: ${if (lastEmailCheckTime > 0L) formatHealthTime(lastEmailCheckTime) else "Never"}"
+                    lastEmailCheckTime == 0L -> "Never checked yet"
+                    else -> "${formatHealthTime(lastEmailCheckTime)} — $lastEmailCheckResult"
+                }
+                val emailFixLabel = when {
+                    !hasImapCreds -> "Configure"
+                    !imapEnabled -> "Enable"
+                    lastEmailCheckIsError -> "Retry"
+                    else -> "Check Now"
+                }
+                HealthCheckRow(
+                    title = "7. Last Email Check & Result",
+                    detail = emailHealthDetail,
+                    isProblem = emailProblem,
+                    fixLabel = emailFixLabel,
+                    onFix = {
+                        when {
+                            !hasImapCreds -> {
+                                settingsScope.launch { settingsListState.animateScrollToItem(5) }
+                            }
+                            !imapEnabled -> {
+                                imapEnabled = true
+                                viewModel.enableAndSyncImapNow()
+                            }
+                            else -> {
+                                viewModel.syncEmailsNow()
+                            }
+                        }
+                    }
+                )
+
+                // 8. Last cloud voice status
+                val isCloudPausedNow = elevenLabsPausedUntil > nowMs && elevenLabsPauseMessage.isNotBlank()
+                val isQuotaExceeded = monthlyElevenLabsChars >= SecurePreferences.MONTHLY_ELEVENLABS_CHAR_LIMIT
+                val cloudVoiceProblem = isCloudPausedNow || !hasElevenSaved || voiceStatusIsError || isQuotaExceeded
+                val cloudVoiceDetail = when {
+                    isCloudPausedNow -> "Paused 24h: $elevenLabsPauseMessage"
+                    !hasElevenSaved -> "No ElevenLabs key saved (using Android TTS 1.0x fallback)"
+                    isQuotaExceeded -> "Monthly 10,000 char budget reached (${monthlyElevenLabsChars}/10,000)"
+                    voiceStatusIsError -> "Error: $voiceStatusText"
+                    else -> "Active (${monthlyElevenLabsChars}/10,000 chars) · $voiceStatusText"
+                }
+                val cloudVoiceFixLabel = when {
+                    isCloudPausedNow -> "Resume"
+                    !hasElevenSaved -> "Add Key"
+                    isQuotaExceeded -> "Use TTS"
+                    else -> "Test Voice"
+                }
+                HealthCheckRow(
+                    title = "8. Cloud Voice Status",
+                    detail = cloudVoiceDetail,
+                    isProblem = cloudVoiceProblem,
+                    fixLabel = cloudVoiceFixLabel,
+                    onFix = {
+                        when {
+                            isCloudPausedNow -> viewModel.clearCloudVoicePauseAndTest()
+                            !hasElevenSaved -> settingsScope.launch { settingsListState.animateScrollToItem(4) }
+                            else -> viewModel.testVoicePlayback("")
+                        }
+                    }
+                )
+            }
         }
 
         // 0. openWakeWord ONNX ("Hey Jarvis") Listener & Live 5Hz Diagnostics
@@ -1021,6 +1308,19 @@ fun SettingsScreen(
                         Text("Save IMAP", color = BgDark, fontWeight = FontWeight.SemiBold)
                     }
                 }
+
+                OutlinedButton(
+                    onClick = onOpenPriorityRules,
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, TealAccent),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Priority Senders & Rules (${senderRules.size})",
+                        color = TealAccent,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
         }
 
@@ -1385,5 +1685,130 @@ private fun SettingsSwitchRow(
             onCheckedChange = onCheckedChange,
             colors = SwitchDefaults.colors(checkedThumbColor = BgDark, checkedTrackColor = TealAccent)
         )
+    }
+}
+
+@Composable
+private fun HealthCheckRow(
+    title: String,
+    detail: String,
+    isProblem: Boolean,
+    fixLabel: String,
+    onFix: () -> Unit
+) {
+    Surface(
+        color = SurfaceSubtleDark,
+        shape = CardShape8,
+        border = BorderStroke(1.dp, if (isProblem) WarningRed else BorderDark),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isProblem) "●" else "✓",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (isProblem) WarningRed else TealAccent,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimaryDark
+                    )
+                }
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isProblem) WarningRed else TextMutedDark
+                )
+            }
+
+            if (isProblem) {
+                Button(
+                    onClick = onFix,
+                    shape = CardShape8,
+                    colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = fixLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = BgDark,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatHealthTime(timestampMillis: Long): String {
+    if (timestampMillis <= 0L) return "Never"
+    return SimpleDateFormat("d MMM h:mm a", Locale.getDefault()).format(Date(timestampMillis))
+}
+
+private fun openNotificationSettings(context: Context) {
+    try {
+        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        }
+        context.startActivity(intent)
+    } catch (_: Exception) {
+        openAppDetailsSettings(context)
+    }
+}
+
+private fun openExactAlarmSettings(context: Context) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            context.startActivity(intent)
+            return
+        } catch (_: Exception) {
+        }
+    }
+    openAppDetailsSettings(context)
+}
+
+private fun openBatteryExemptionPrompt(context: Context) {
+    try {
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = Uri.parse("package:${context.packageName}")
+        }
+        context.startActivity(intent)
+    } catch (_: Exception) {
+        try {
+            context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        } catch (_: Exception) {
+            openAppDetailsSettings(context)
+        }
+    }
+}
+
+private fun openAppDetailsSettings(context: Context) {
+    try {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.parse("package:${context.packageName}")
+        }
+        context.startActivity(intent)
+    } catch (_: Exception) {
     }
 }
