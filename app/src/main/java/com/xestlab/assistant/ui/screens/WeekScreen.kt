@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.xestlab.assistant.service.LeadCadenceEngine
 import com.xestlab.assistant.ui.theme.BgDark
 import com.xestlab.assistant.ui.theme.BorderDark
 import com.xestlab.assistant.ui.theme.CardShape8
@@ -47,10 +48,51 @@ fun WeekScreen(viewModel: AssistantViewModel) {
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
-            text = "7-DAY EXECUTION SUMMARY",
+            text = "7-DAY EXECUTION SUMMARY (AUTO-COUNTED FROM LEADS & PAYMENTS)",
             style = MaterialTheme.typography.labelMedium,
             color = TealAccent
         )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = CardShape8,
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            border = BorderStroke(1.dp, TealAccent)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = "CASH LOGGED (7D)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextMutedDark
+                    )
+                    Text(
+                        text = "₦${LeadCadenceEngine.formatWithCommas(summary.weekCashNgn)}",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = TealAccent
+                    )
+                }
+                Column {
+                    Text(
+                        text = "DEALS WON (7D)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextMutedDark
+                    )
+                    Text(
+                        text = summary.winsCount.toString(),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimaryDark
+                    )
+                }
+            }
+        }
 
         MetricProgressCard(
             label = "Outreach Messages Sent",

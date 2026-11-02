@@ -90,7 +90,7 @@ class VoiceReminderService : Service() {
             val spokenScript = if (!customText.isNullOrBlank()) {
                 customText
             } else {
-                TtsGreetingHelper.buildDynamicBriefing(db, displayName)
+                TtsGreetingHelper.buildDynamicBriefing(db, displayName, briefingTitle)
             }
 
             voiceEngine.speak(

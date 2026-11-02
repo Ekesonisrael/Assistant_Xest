@@ -14,9 +14,14 @@ import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
+import com.xestlab.assistant.data.model.Lead
+import com.xestlab.assistant.data.model.LeadEvent
+import com.xestlab.assistant.data.model.MessageTemplateEntity
+import com.xestlab.assistant.data.model.Payment
 import com.xestlab.assistant.data.model.ReminderSchedule
 import com.xestlab.assistant.data.model.UnreadEmailEntity
 import com.xestlab.assistant.data.model.UserSettings
+import com.xestlab.assistant.service.LeadCadenceEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -33,9 +38,13 @@ import kotlinx.coroutines.launch
         ConversationTurn::class,
         UnreadEmailEntity::class,
         EmailSenderRuleEntity::class,
-        CustomEmailTagEntity::class
+        CustomEmailTagEntity::class,
+        Lead::class,
+        LeadEvent::class,
+        MessageTemplateEntity::class,
+        Payment::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -50,6 +59,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
     abstract fun emailDao(): EmailDao
     abstract fun emailRuleDao(): EmailRuleDao
+    abstract fun leadDao(): LeadDao
+    abstract fun messageTemplateDao(): MessageTemplateDao
+    abstract fun paymentDao(): PaymentDao
 
     companion object {
         @Volatile
@@ -189,6 +201,74 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `goals` ADD COLUMN `websitePrice` INTEGER NOT NULL DEFAULT 250000")
+                db.execSQL("ALTER TABLE `goals` ADD COLUMN `retainerPrice` INTEGER NOT NULL DEFAULT 80000")
+                db.execSQL("ALTER TABLE `goals` ADD COLUMN `monthlyTarget` INTEGER NOT NULL DEFAULT 850000")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `leads` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `phone` TEXT NOT NULL,
+                        `source` TEXT NOT NULL,
+                        `referredBy` TEXT NOT NULL,
+                        `stage` TEXT NOT NULL,
+                        `service` TEXT NOT NULL,
+                        `observation` TEXT NOT NULL,
+                        `quoteAmount` INTEGER,
+                        `notes` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `lastContactAt` INTEGER,
+                        `nextActionAt` INTEGER,
+                        `nextActionType` TEXT
+                    )
+                    """.trimIndent()
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `lead_events` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `leadId` INTEGER NOT NULL,
+                        `type` TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `at` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `message_templates` (
+                        `stepKey` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `bodyTemplate` TEXT NOT NULL,
+                        `orderIndex` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`stepKey`)
+                    )
+                    """.trimIndent()
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `payments` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `clientName` TEXT NOT NULL,
+                        `leadId` INTEGER,
+                        `amount` INTEGER NOT NULL,
+                        `type` TEXT NOT NULL,
+                        `paidAt` INTEGER NOT NULL,
+                        `note` TEXT NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val appContext = context.applicationContext
@@ -197,7 +277,13 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "xestlab_assistant.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(
+                        MIGRATION_1_2,
+                        MIGRATION_2_3,
+                        MIGRATION_3_4,
+                        MIGRATION_4_5,
+                        MIGRATION_5_6
+                    )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)
@@ -217,6 +303,10 @@ abstract class AppDatabase : RoomDatabase() {
             if (existingChecklist.isEmpty()) {
                 seedDefaultData(db)
             }
+            val existingTemplates = db.messageTemplateDao().getAllTemplatesDirect()
+            if (existingTemplates.isEmpty()) {
+                db.messageTemplateDao().upsertTemplates(LeadCadenceEngine.defaultTemplates())
+            }
         }
 
         private suspend fun seedDefaultData(db: AppDatabase) {
@@ -231,9 +321,14 @@ abstract class AppDatabase : RoomDatabase() {
                     q4Target = 3500000L,
                     weeklyMessagesTarget = 50,
                     weeklyConversationsTarget = 5,
-                    weeklyQuotesTarget = 3
+                    weeklyQuotesTarget = 3,
+                    websitePrice = 250000L,
+                    retainerPrice = 80000L,
+                    monthlyTarget = 850000L
                 )
             )
+
+            db.messageTemplateDao().upsertTemplates(LeadCadenceEngine.defaultTemplates())
 
             val defaultChecklist = listOf(
                 ChecklistItem("messages10", "10 personalised outreach messages sent", isCountType = true, defaultTargetCount = 10, orderIndex = 1),

@@ -1,10 +1,12 @@
 package com.xestlab.assistant.ui.viewmodel
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.xestlab.assistant.ai.AiClient
 import com.xestlab.assistant.ai.AssistantParser
+import com.xestlab.assistant.ai.MoneyAndLeadParser
 import com.xestlab.assistant.ai.ParsedIntent
 import com.xestlab.assistant.ai.PlannerEngine
 import com.xestlab.assistant.ai.PlannerProposal
@@ -21,14 +23,21 @@ import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
+import com.xestlab.assistant.data.model.Lead
+import com.xestlab.assistant.data.model.LeadEvent
+import com.xestlab.assistant.data.model.MessageTemplateEntity
+import com.xestlab.assistant.data.model.Payment
 import com.xestlab.assistant.data.model.ReminderSchedule
 import com.xestlab.assistant.data.model.UnreadEmailEntity
 import com.xestlab.assistant.data.model.UserSettings
 import com.xestlab.assistant.data.repository.AssistantRepository
 import com.xestlab.assistant.data.repository.WeeklySummaryData
 import com.xestlab.assistant.service.AlarmScheduler
+import com.xestlab.assistant.service.DueFollowUpUiModel
 import com.xestlab.assistant.service.EmailHelper
 import com.xestlab.assistant.service.InstalledTtsVoiceInfo
+import com.xestlab.assistant.service.LeadCadenceEngine
+import com.xestlab.assistant.service.RevenueGaugeMetrics
 import com.xestlab.assistant.service.TtsGreetingHelper
 import com.xestlab.assistant.service.VoiceEngine
 import com.xestlab.assistant.service.WakeWordDiagnostics
@@ -38,6 +47,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -46,6 +57,38 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+
+sealed class PendingConfirmation {
+    abstract val promptText: String
+
+    data class AddLead(
+        val name: String,
+        val service: String,
+        val phone: String,
+        val observation: String,
+        override val promptText: String
+    ) : PendingConfirmation()
+
+    data class UpdateLeadStage(
+        val leadId: Long,
+        val leadName: String,
+        val targetStage: String,
+        val quoteAmount: Long?,
+        override val promptText: String
+    ) : PendingConfirmation()
+
+    data class LogPayment(
+        val clientName: String,
+        val matchedLeadId: Long?,
+        val matchedLeadName: String?,
+        val matchedLeadStage: String?,
+        val amount: Long,
+        val paymentType: String,
+        val note: String,
+        val canMarkWon: Boolean,
+        override val promptText: String
+    ) : PendingConfirmation()
+}
 
 class AssistantViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -195,6 +238,43 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val customEmailTags: StateFlow<List<CustomEmailTagEntity>> = repository.customEmailTags
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val leads: StateFlow<List<Lead>> = repository.leads
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val allLeadEvents: StateFlow<List<LeadEvent>> = repository.allLeadEvents
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val messageTemplates: StateFlow<List<MessageTemplateEntity>> = repository.messageTemplates
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val payments: StateFlow<List<Payment>> = repository.payments
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val dueFollowUpsToday: StateFlow<List<DueFollowUpUiModel>> = combine(
+        repository.leads,
+        repository.pendingItems
+    ) { currentLeads, currentPending ->
+        LeadCadenceEngine.computeDueFollowUpsToday(currentLeads, currentPending)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val needsAttentionLeads: StateFlow<List<Lead>> = repository.leads
+        .map { currentLeads -> LeadCadenceEngine.computeNeedsAttentionLeads(currentLeads) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val revenueGauge: StateFlow<RevenueGaugeMetrics> = combine(
+        repository.goals.map { it ?: Goal() },
+        repository.payments
+    ) { goal, paymentList ->
+        LeadCadenceEngine.computeRevenueGauge(goal, paymentList)
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        LeadCadenceEngine.computeRevenueGauge(Goal(), emptyList())
+    )
+
+    private val _pendingConfirmation = MutableStateFlow<PendingConfirmation?>(null)
+    val pendingConfirmation: StateFlow<PendingConfirmation?> = _pendingConfirmation.asStateFlow()
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val filteredNotes: StateFlow<List<Item>> = _noteSearchQuery
         .flatMapLatest { query -> repository.searchNotes(query) }
@@ -217,6 +297,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             }
             refreshDailyPlanText()
             refreshWeeklySummary()
+        }
+        viewModelScope.launch {
+            combine(
+                repository.leads,
+                repository.allLeadEvents,
+                repository.payments
+            ) { _, _, _ -> Unit }.collect {
+                refreshWeeklySummary()
+            }
         }
     }
 
@@ -325,9 +414,119 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             repository.recordTurn("USER", cleaned)
             val prefs = userPreferencesDataStore.getSnapshot()
             val name = prefs.userName.ifBlank { "King Israel" }
+
+            // Intercept active voice/on-screen confirmation replies first
+            val activePending = _pendingConfirmation.value
+            if (activePending != null) {
+                val lowerReply = cleaned.lowercase(Locale.US).trimEnd('.', '!', '?')
+                val yesAndMarkWon = lowerReply in setOf(
+                    "yes mark won",
+                    "yes and mark won",
+                    "confirm and mark won",
+                    "mark won",
+                    "yes won"
+                )
+                if (yesAndMarkWon || MoneyAndLeadParser.isAffirmativeConfirmation(cleaned)) {
+                    executePendingConfirmationInternal(activePending, alsoMarkLeadWon = yesAndMarkWon)
+                    return@launch
+                }
+                if (MoneyAndLeadParser.isNegativeConfirmation(cleaned)) {
+                    _pendingConfirmation.value = null
+                    respond("Cancelled — nothing was saved.", speak = true)
+                    return@launch
+                }
+            }
+
             val intent = AssistantParser.parse(cleaned)
 
             when (intent) {
+                is ParsedIntent.WhoIsDueToday -> {
+                    val allLeads = db.leadDao().getAllLeadsDirect()
+                    val pending = db.itemDao().getPendingItemsDirect()
+                    val dueToday = LeadCadenceEngine.computeDueFollowUpsToday(allLeads, pending)
+                    val speech = if (dueToday.isEmpty()) {
+                        "You have no lead follow-ups due today, $name."
+                    } else {
+                        val header = "You have ${dueToday.size} ${if (dueToday.size == 1) "follow-up" else "follow-ups"} due today. "
+                        header + dueToday.joinToString(" ") { it.displayLine }
+                    }
+                    respond(speech, speak = true)
+                }
+
+                is ParsedIntent.AddLeadVoice -> {
+                    val phoneClause = if (intent.phone.isNotBlank()) " with phone ${intent.phone}" else ""
+                    val prompt = "Add lead ${intent.name} for ${intent.service.lowercase(Locale.US)}$phoneClause? Say yes or tap Confirm."
+                    _pendingConfirmation.value = PendingConfirmation.AddLead(
+                        name = intent.name,
+                        service = intent.service,
+                        phone = intent.phone,
+                        observation = intent.observation,
+                        promptText = prompt
+                    )
+                    respond(prompt, speak = true)
+                }
+
+                is ParsedIntent.LeadStageVoice -> {
+                    val matched = repository.findBestMatchingLead(intent.leadName)
+                    if (matched == null) {
+                        respond(
+                            "I couldn't find a lead matching '${intent.leadName}'. Say 'add lead ${intent.leadName}, website' first, or check the Leads tab.",
+                            speak = true
+                        )
+                    } else {
+                        val prompt = when (intent.targetStage) {
+                            LeadCadenceEngine.STAGE_REPLIED ->
+                                "Mark ${matched.name} as Replied, pause cadence, and schedule a quote within 24 hours? Say yes or tap Confirm."
+                            LeadCadenceEngine.STAGE_QUOTED -> {
+                                val amtLabel = intent.quoteAmount?.let {
+                                    " at ${LeadCadenceEngine.formatWithCommas(it)} naira"
+                                }.orEmpty()
+                                "Mark ${matched.name} as Quoted$amtLabel and schedule Day 2 and Day 5 follow-ups? Say yes or tap Confirm."
+                            }
+                            LeadCadenceEngine.STAGE_WON ->
+                                "Mark ${matched.name} as Won and cancel all remaining follow-up alarms? Say yes or tap Confirm."
+                            else ->
+                                "Mark ${matched.name} as Lost and cancel all remaining follow-up alarms? Say yes or tap Confirm."
+                        }
+                        _pendingConfirmation.value = PendingConfirmation.UpdateLeadStage(
+                            leadId = matched.id,
+                            leadName = matched.name,
+                            targetStage = intent.targetStage,
+                            quoteAmount = intent.quoteAmount,
+                            promptText = prompt
+                        )
+                        respond(prompt, speak = true)
+                    }
+                }
+
+                is ParsedIntent.LogPaymentVoice -> {
+                    val matchedLead = repository.findBestMatchingLead(intent.clientName)
+                    val displayClient = matchedLead?.name ?: intent.clientName
+                    val canMarkWon = matchedLead != null &&
+                        matchedLead.stage != LeadCadenceEngine.STAGE_WON &&
+                        matchedLead.stage != LeadCadenceEngine.STAGE_LOST
+                    val wonOffer = when {
+                        matchedLead?.stage == LeadCadenceEngine.STAGE_QUOTED ->
+                            " ${matchedLead.name} is currently Quoted — tap 'Confirm & Mark Won' or say 'yes mark won' to also close the lead."
+                        canMarkWon ->
+                            " Matched lead ${matchedLead?.name} (${matchedLead?.stage})."
+                        else -> ""
+                    }
+                    val prompt = "Log ${LeadCadenceEngine.formatWithCommas(intent.amount)} naira from $displayClient as ${intent.paymentType.lowercase(Locale.US)} payment?$wonOffer"
+                    _pendingConfirmation.value = PendingConfirmation.LogPayment(
+                        clientName = displayClient,
+                        matchedLeadId = matchedLead?.id,
+                        matchedLeadName = matchedLead?.name,
+                        matchedLeadStage = matchedLead?.stage,
+                        amount = intent.amount,
+                        paymentType = intent.paymentType,
+                        note = intent.note,
+                        canMarkWon = canMarkWon,
+                        promptText = prompt
+                    )
+                    respond(prompt, speak = true)
+                }
+
                 is ParsedIntent.ExplicitNote -> {
                     repository.saveItem(
                         Item(
@@ -384,8 +583,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     } else {
                         val matchingItem = db.itemDao().getItemByTitle(intent.targetQuery)
                         if (matchingItem != null) {
-                            repository.updateItemStatus(matchingItem.id, "COMPLETED")
+                            val parsedFollowUp = LeadCadenceEngine.parseFollowUpSourceText(matchingItem.sourceText)
+                            if (parsedFollowUp != null) {
+                                LeadCadenceEngine.completeDueFollowUpStep(
+                                    context = appContext,
+                                    db = db,
+                                    leadId = parsedFollowUp.first,
+                                    reminderItemId = matchingItem.id
+                                )
+                            } else {
+                                repository.updateItemStatus(matchingItem.id, "COMPLETED")
+                            }
                             refreshDailyPlanText()
+                            refreshWeeklySummary()
                             val allCleared = TtsGreetingHelper.countRemainingTasksForToday(db) == 0
                             respond(TtsGreetingHelper.buildTaskCompletionSpeech(allCleared), speak = true)
                         } else {
@@ -797,13 +1007,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun buildWeeklyReviewPlainText(): String {
         val w = _weeklySummary.value
         val g = goals.value
+        val gauge = revenueGauge.value
         val name = prefsState.value.userName.ifBlank { "King Israel" }
         return buildString {
             appendLine("$name - 7-Day Execution Review ($todayDateString)")
-            appendLine("Yearly Target: NGN ${String.format(Locale.US, "%,d", g.yearlyGoal)}")
+            appendLine("Yearly Target: NGN ${String.format(Locale.US, "%,d", g.yearlyGoal)} | YTD: NGN ${String.format(Locale.US, "%,d", gauge.ytdCash)}")
             appendLine("- Outreach Messages: ${w.messagesCount} / ${w.messagesTarget}")
             appendLine("- Active Conversations: ${w.conversationsCount} / ${w.conversationsTarget}")
             appendLine("- Quotes Sent: ${w.quotesCount} / ${w.quotesTarget}")
+            appendLine("- Deals Won This Week: ${w.winsCount}")
+            appendLine("- Cash Logged This Week: NGN ${String.format(Locale.US, "%,d", w.weekCashNgn)}")
             appendLine("- Content Published: ${w.contentCount} days")
             appendLine("- Study Blocks: ${w.studyCount} days")
         }
@@ -1229,5 +1442,460 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         WakeWordService.stop(appContext)
         WakeWordService.start(appContext, initiatedByUserTap = true)
         _statusBanner.value = "Restarted 'Hey Jarvis' wake-word listener."
+    }
+
+    // --- Leads, Automatic Cadence, Message Templates & Payments Actions ---
+
+    fun confirmPendingAction(alsoMarkLeadWon: Boolean = false) {
+        val pending = _pendingConfirmation.value ?: return
+        viewModelScope.launch {
+            executePendingConfirmationInternal(pending, alsoMarkLeadWon)
+        }
+    }
+
+    fun cancelPendingConfirmation() {
+        _pendingConfirmation.value = null
+        _statusBanner.value = "Action cancelled."
+    }
+
+    private suspend fun executePendingConfirmationInternal(
+        pending: PendingConfirmation,
+        alsoMarkLeadWon: Boolean
+    ) {
+        _pendingConfirmation.value = null
+        when (pending) {
+            is PendingConfirmation.AddLead -> {
+                val created = repository.createLead(
+                    context = appContext,
+                    name = pending.name,
+                    service = pending.service,
+                    phone = pending.phone,
+                    source = "Voice / Chat",
+                    observation = pending.observation,
+                    startContactedCadence = false
+                )
+                refreshDailyPlanText()
+                refreshWeeklySummary()
+                val msg = "Added lead ${created.name} (${created.service})."
+                _statusBanner.value = msg
+                respond(msg, speak = true)
+            }
+
+            is PendingConfirmation.UpdateLeadStage -> {
+                when (pending.targetStage) {
+                    LeadCadenceEngine.STAGE_REPLIED -> {
+                        LeadCadenceEngine.markLeadReplied(
+                            context = appContext,
+                            db = db,
+                            leadId = pending.leadId
+                        )
+                        val msg = "Marked ${pending.leadName} as Replied and scheduled a quote task within 24 hours."
+                        _statusBanner.value = msg
+                        respond(msg, speak = true)
+                    }
+                    LeadCadenceEngine.STAGE_QUOTED -> {
+                        LeadCadenceEngine.markLeadQuoted(
+                            context = appContext,
+                            db = db,
+                            leadId = pending.leadId,
+                            quoteAmount = pending.quoteAmount
+                        )
+                        val amtText = pending.quoteAmount?.let {
+                            " at ₦${LeadCadenceEngine.formatWithCommas(it)}"
+                        }.orEmpty()
+                        val msg = "Marked ${pending.leadName} as Quoted$amtText and scheduled Day 2 and Day 5 follow-ups."
+                        _statusBanner.value = msg
+                        respond(msg, speak = true)
+                    }
+                    LeadCadenceEngine.STAGE_WON -> {
+                        LeadCadenceEngine.markLeadClosed(
+                            context = appContext,
+                            db = db,
+                            leadId = pending.leadId,
+                            won = true
+                        )
+                        val msg = "Congratulations! Marked ${pending.leadName} as Won and cancelled remaining follow-ups."
+                        _statusBanner.value = msg
+                        respond(msg, speak = true)
+                    }
+                    LeadCadenceEngine.STAGE_LOST -> {
+                        LeadCadenceEngine.markLeadClosed(
+                            context = appContext,
+                            db = db,
+                            leadId = pending.leadId,
+                            won = false
+                        )
+                        val msg = "Marked ${pending.leadName} as Lost and cancelled remaining follow-ups."
+                        _statusBanner.value = msg
+                        respond(msg, speak = true)
+                    }
+                }
+                refreshDailyPlanText()
+                refreshWeeklySummary()
+            }
+
+            is PendingConfirmation.LogPayment -> {
+                val payment = repository.addPayment(
+                    clientName = pending.clientName,
+                    amount = pending.amount,
+                    type = pending.paymentType,
+                    note = pending.note,
+                    explicitLeadId = pending.matchedLeadId
+                )
+                if (alsoMarkLeadWon && pending.matchedLeadId != null) {
+                    LeadCadenceEngine.markLeadClosed(
+                        context = appContext,
+                        db = db,
+                        leadId = pending.matchedLeadId,
+                        won = true,
+                        note = "Payment of ₦${LeadCadenceEngine.formatWithCommas(payment.amount)} received"
+                    )
+                }
+                refreshDailyPlanText()
+                refreshWeeklySummary()
+
+                val goal = db.goalDao().getGoalsDirect() ?: Goal()
+                val allPayments = db.paymentDao().getAllPaymentsDirect()
+                val gauge = LeadCadenceEngine.computeRevenueGauge(goal, allPayments)
+                val wonSuffix = if (alsoMarkLeadWon && pending.matchedLeadName != null) {
+                    " Marked ${pending.matchedLeadName} as Won."
+                } else {
+                    ""
+                }
+                val msg = "Logged ₦${LeadCadenceEngine.formatWithCommas(payment.amount)} from ${payment.clientName} (${payment.type}).$wonSuffix ${gauge.homeGaugeLine}"
+                _statusBanner.value = "Logged ₦${LeadCadenceEngine.formatWithCommas(payment.amount)} from ${payment.clientName}."
+                respond(msg, speak = true)
+            }
+        }
+    }
+
+    fun createLead(
+        name: String,
+        service: String,
+        phone: String = "",
+        source: String = "",
+        referredBy: String = "",
+        observation: String = "",
+        notes: String = "",
+        startContactedCadence: Boolean = false
+    ) {
+        val cleanName = name.trim()
+        if (cleanName.isEmpty()) return
+        viewModelScope.launch {
+            val saved = repository.createLead(
+                context = appContext,
+                name = cleanName,
+                service = service,
+                phone = phone,
+                source = source,
+                referredBy = referredBy,
+                observation = observation,
+                notes = notes,
+                startContactedCadence = startContactedCadence
+            )
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            _statusBanner.value = if (startContactedCadence) {
+                "Added ${saved.name} (${saved.service}) & scheduled Day 0 / 2 / 5 / 10 cadence."
+            } else {
+                "Added lead ${saved.name} (${saved.service})."
+            }
+        }
+    }
+
+    fun createLeadFromEmail(
+        email: UnreadEmailEntity,
+        name: String,
+        service: String,
+        phone: String,
+        observation: String
+    ) {
+        val cleanName = name.trim()
+        if (cleanName.isEmpty()) return
+        viewModelScope.launch {
+            val emailNotes = "Email subject: ${email.subject}. ${email.snippet}".take(300)
+            val saved = repository.createLead(
+                context = appContext,
+                name = cleanName,
+                service = service,
+                phone = phone,
+                source = "Email (${email.senderAddress.ifBlank { email.sender }})",
+                observation = observation,
+                notes = emailNotes,
+                startContactedCadence = false
+            )
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            _statusBanner.value = "Added lead '${saved.name}' from email."
+        }
+    }
+
+    fun updateLeadDetails(lead: Lead) {
+        viewModelScope.launch {
+            repository.updateLeadDetails(lead)
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            _statusBanner.value = "Saved changes for ${lead.name}."
+        }
+    }
+
+    fun addLeadNote(leadId: Long, noteText: String) {
+        val clean = noteText.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            repository.addLeadNoteEvent(leadId, clean)
+            _statusBanner.value = "Added note to lead history."
+        }
+    }
+
+    fun deleteLead(lead: Lead) {
+        viewModelScope.launch {
+            repository.deleteLead(appContext, lead)
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            _statusBanner.value = "Deleted lead ${lead.name}."
+        }
+    }
+
+    fun markLeadContacted(leadId: Long, day0AlreadySent: Boolean = false) {
+        viewModelScope.launch {
+            LeadCadenceEngine.markLeadContacted(
+                context = appContext,
+                db = db,
+                leadId = leadId,
+                day0AlreadySent = day0AlreadySent
+            )
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            val lead = db.leadDao().getLeadById(leadId)
+            _statusBanner.value = "Marked ${lead?.name ?: "lead"} CONTACTED — scheduled Day 0, 2, 5, and 10 alarms."
+        }
+    }
+
+    fun markLeadReplied(leadId: Long, note: String = "") {
+        viewModelScope.launch {
+            LeadCadenceEngine.markLeadReplied(
+                context = appContext,
+                db = db,
+                leadId = leadId,
+                note = note
+            )
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            val lead = db.leadDao().getLeadById(leadId)
+            _statusBanner.value = "Marked ${lead?.name ?: "lead"} REPLIED — quote task scheduled within 24h."
+        }
+    }
+
+    fun logLeadQuote(leadId: Long, rawAmountInput: String, note: String = "") {
+        viewModelScope.launch {
+            val parsedAmount = MoneyAndLeadParser.parseNairaAmount(rawAmountInput)
+                ?: rawAmountInput.replace(",", "").trim().toLongOrNull()
+            LeadCadenceEngine.markLeadQuoted(
+                context = appContext,
+                db = db,
+                leadId = leadId,
+                quoteAmount = parsedAmount,
+                note = note
+            )
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            val lead = db.leadDao().getLeadById(leadId)
+            val amtText = parsedAmount?.let { " (₦${LeadCadenceEngine.formatWithCommas(it)})" }.orEmpty()
+            _statusBanner.value = "Marked ${lead?.name ?: "lead"} QUOTED$amtText — Day 2 & Day 5 follow-ups scheduled."
+        }
+    }
+
+    fun markLeadWon(leadId: Long, note: String = "") {
+        viewModelScope.launch {
+            LeadCadenceEngine.markLeadClosed(
+                context = appContext,
+                db = db,
+                leadId = leadId,
+                won = true,
+                note = note
+            )
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            val lead = db.leadDao().getLeadById(leadId)
+            _statusBanner.value = "Marked ${lead?.name ?: "lead"} WON — follow-up alarms cancelled."
+        }
+    }
+
+    fun markLeadLost(leadId: Long, note: String = "") {
+        viewModelScope.launch {
+            LeadCadenceEngine.markLeadClosed(
+                context = appContext,
+                db = db,
+                leadId = leadId,
+                won = false,
+                note = note
+            )
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            val lead = db.leadDao().getLeadById(leadId)
+            _statusBanner.value = "Marked ${lead?.name ?: "lead"} LOST — follow-up alarms cancelled."
+        }
+    }
+
+    fun completeDueFollowUp(due: DueFollowUpUiModel) {
+        viewModelScope.launch {
+            LeadCadenceEngine.completeDueFollowUpStep(
+                context = appContext,
+                db = db,
+                leadId = due.lead.id,
+                reminderItemId = due.reminderItemId
+            )
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            _statusBanner.value = "Completed ${LeadCadenceEngine.stepShortLabel(due.stepKey)} for ${due.lead.name}."
+        }
+    }
+
+    fun snoozeDueFollowUp(due: DueFollowUpUiModel) {
+        viewModelScope.launch {
+            LeadCadenceEngine.snoozeDueFollowUpStep(
+                context = appContext,
+                db = db,
+                leadId = due.lead.id,
+                reminderItemId = due.reminderItemId
+            )
+            refreshDailyPlanText()
+            _statusBanner.value = "Snoozed ${due.lead.name} follow-up to tomorrow 9:00 AM."
+        }
+    }
+
+    fun loadDraftPreview(
+        lead: Lead,
+        stepKey: String?,
+        useAiRewrite: Boolean,
+        onLoaded: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val draft = LeadCadenceEngine.buildDraftForLead(
+                db = db,
+                securePrefs = securePrefs,
+                lead = lead,
+                stepKey = stepKey,
+                allowAiRewrite = useAiRewrite
+            )
+            onLoaded(draft)
+        }
+    }
+
+    fun openLeadWhatsAppWithDraft(
+        activityContext: Context,
+        lead: Lead,
+        stepKey: String?,
+        updatedObservation: String? = null,
+        customDraftOverride: String? = null
+    ) {
+        viewModelScope.launch {
+            var currentLead = db.leadDao().getLeadById(lead.id) ?: lead
+            if (!updatedObservation.isNullOrBlank() && updatedObservation.trim() != currentLead.observation) {
+                currentLead = currentLead.copy(observation = updatedObservation.trim())
+                repository.updateLeadDetails(currentLead)
+            }
+            val effectiveStep = stepKey ?: currentLead.nextActionType ?: LeadCadenceEngine.STEP_DAY_0_MESSAGE
+            val draft = customDraftOverride?.takeIf { it.isNotBlank() }
+                ?: LeadCadenceEngine.buildDraftForLead(
+                    db = db,
+                    securePrefs = securePrefs,
+                    lead = currentLead,
+                    stepKey = effectiveStep,
+                    allowAiRewrite = true
+                )
+
+            val opened = LeadCadenceEngine.openWhatsAppWithDraft(
+                context = activityContext,
+                phone = currentLead.phone,
+                draft = draft
+            )
+            if (!opened) {
+                _statusBanner.value = "Could not open WhatsApp or browser on this device."
+            }
+        }
+    }
+
+    fun callLead(activityContext: Context, lead: Lead) {
+        if (lead.phone.isBlank()) {
+            _statusBanner.value = "No phone number saved for ${lead.name}. Edit the lead to add a phone number."
+            return
+        }
+        val opened = LeadCadenceEngine.openDialerForLead(activityContext, lead.phone)
+        if (!opened) {
+            _statusBanner.value = "Unable to open phone dialer on this device."
+        }
+    }
+
+    fun saveMessageTemplate(template: MessageTemplateEntity) {
+        viewModelScope.launch {
+            repository.saveMessageTemplate(template)
+            _statusBanner.value = "Saved template: ${template.title}."
+        }
+    }
+
+    fun resetMessageTemplates() {
+        viewModelScope.launch {
+            repository.resetMessageTemplatesToDefaults()
+            _statusBanner.value = "Reset all follow-up message templates to defaults."
+        }
+    }
+
+    fun addManualPayment(
+        clientName: String,
+        rawAmountInput: String,
+        type: String,
+        note: String,
+        alsoMarkMatchedLeadWon: Boolean = false
+    ) {
+        val cleanClient = clientName.trim()
+        if (cleanClient.isEmpty()) return
+        val amount = MoneyAndLeadParser.parseNairaAmount(rawAmountInput)
+            ?: rawAmountInput.replace(",", "").trim().toLongOrNull()
+        if (amount == null || amount <= 0L) {
+            _statusBanner.value = "Enter a valid amount (for example 150k or 250,000)."
+            return
+        }
+        viewModelScope.launch {
+            val matchedLead = repository.findBestMatchingLead(cleanClient)
+            val saved = repository.addPayment(
+                clientName = matchedLead?.name ?: cleanClient,
+                amount = amount,
+                type = type,
+                note = note,
+                explicitLeadId = matchedLead?.id
+            )
+            if (alsoMarkMatchedLeadWon && matchedLead != null && matchedLead.stage != LeadCadenceEngine.STAGE_WON) {
+                LeadCadenceEngine.markLeadClosed(
+                    context = appContext,
+                    db = db,
+                    leadId = matchedLead.id,
+                    won = true,
+                    note = "Logged payment of ₦${LeadCadenceEngine.formatWithCommas(amount)}"
+                )
+            }
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            _statusBanner.value = "Logged ₦${LeadCadenceEngine.formatWithCommas(saved.amount)} from ${saved.clientName} (${saved.type})."
+        }
+    }
+
+    fun updatePayment(payment: Payment) {
+        viewModelScope.launch {
+            repository.updatePayment(payment)
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            _statusBanner.value = "Updated payment for ${payment.clientName}."
+        }
+    }
+
+    fun deletePayment(payment: Payment) {
+        viewModelScope.launch {
+            repository.deletePayment(payment)
+            refreshDailyPlanText()
+            refreshWeeklySummary()
+            _statusBanner.value = "Deleted payment entry for ${payment.clientName}."
+        }
     }
 }

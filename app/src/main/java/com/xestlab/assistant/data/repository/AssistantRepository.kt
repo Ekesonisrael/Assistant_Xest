@@ -1,5 +1,6 @@
 package com.xestlab.assistant.data.repository
 
+import android.content.Context
 import com.xestlab.assistant.data.UserPreferencesDataStore
 import com.xestlab.assistant.data.WebTrackerImporter
 import com.xestlab.assistant.data.local.AppDatabase
@@ -11,15 +12,22 @@ import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
+import com.xestlab.assistant.data.model.Lead
+import com.xestlab.assistant.data.model.LeadEvent
+import com.xestlab.assistant.data.model.MessageTemplateEntity
+import com.xestlab.assistant.data.model.Payment
 import com.xestlab.assistant.data.model.ReminderSchedule
 import com.xestlab.assistant.data.model.UnreadEmailEntity
 import com.xestlab.assistant.data.model.learnedKeywordsList
 import com.xestlab.assistant.data.model.tagsList
+import com.xestlab.assistant.service.AlarmScheduler
 import com.xestlab.assistant.service.EmailPriorityEngine
+import com.xestlab.assistant.service.LeadCadenceEngine
 import com.xestlab.assistant.service.TtsGreetingHelper
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
 import java.util.Locale
 
 data class WeeklySummaryData(
@@ -29,6 +37,8 @@ data class WeeklySummaryData(
     val conversationsTarget: Int,
     val quotesCount: Int,
     val quotesTarget: Int,
+    val winsCount: Int = 0,
+    val weekCashNgn: Long = 0L,
     val contentCount: Int,
     val studyCount: Int
 )
@@ -48,12 +58,19 @@ class AssistantRepository(
     val unreadEmails: Flow<List<UnreadEmailEntity>> = db.emailDao().observeRecentUnread()
     val senderRules: Flow<List<EmailSenderRuleEntity>> = db.emailRuleDao().observeSenderRules()
     val customEmailTags: Flow<List<CustomEmailTagEntity>> = db.emailRuleDao().observeCustomTags()
+    val leads: Flow<List<Lead>> = db.leadDao().observeAllLeads()
+    val allLeadEvents: Flow<List<LeadEvent>> = db.leadDao().observeAllEvents()
+    val messageTemplates: Flow<List<MessageTemplateEntity>> = db.messageTemplateDao().observeAllTemplates()
+    val payments: Flow<List<Payment>> = db.paymentDao().observeAllPayments()
 
     fun getLogsForDate(date: String): Flow<List<DailyLog>> =
         db.dailyLogDao().observeLogsForDate(date)
 
     fun searchNotes(query: String): Flow<List<Item>> =
         db.itemDao().searchNotes(query)
+
+    fun observeEventsForLead(leadId: Long): Flow<List<LeadEvent>> =
+        db.leadDao().observeEventsForLead(leadId)
 
     suspend fun saveItem(item: Item): Long = db.itemDao().insertItem(item)
 
@@ -108,6 +125,160 @@ class AssistantRepository(
 
     suspend fun deleteReminder(reminder: ReminderSchedule) =
         db.reminderDao().deleteReminder(reminder)
+
+    // --- Leads & Cadence ---
+
+    suspend fun createLead(
+        context: Context,
+        name: String,
+        service: String,
+        phone: String = "",
+        source: String = "",
+        referredBy: String = "",
+        observation: String = "",
+        notes: String = "",
+        startContactedCadence: Boolean = false
+    ): Lead {
+        val now = System.currentTimeMillis()
+        val cleanName = name.trim()
+        val normService = LeadCadenceEngine.normalizeService(service)
+        val leadId = db.leadDao().insertLead(
+            Lead(
+                name = cleanName,
+                phone = phone.trim(),
+                source = source.trim(),
+                referredBy = referredBy.trim(),
+                stage = LeadCadenceEngine.STAGE_NEW,
+                service = normService,
+                observation = observation.trim(),
+                notes = notes.trim(),
+                createdAt = now
+            )
+        )
+        db.leadDao().insertEvent(
+            LeadEvent(
+                leadId = leadId,
+                type = "CREATED",
+                text = "Added lead ($normService)${if (source.isNotBlank()) " via ${source.trim()}" else ""}.",
+                at = now
+            )
+        )
+        if (startContactedCadence) {
+            LeadCadenceEngine.markLeadContacted(
+                context = context,
+                db = db,
+                leadId = leadId,
+                day0AlreadySent = false,
+                nowMillis = now
+            )
+        }
+        return db.leadDao().getLeadById(leadId) ?: Lead(id = leadId, name = cleanName, service = normService)
+    }
+
+    suspend fun updateLeadDetails(lead: Lead) {
+        db.leadDao().updateLead(lead)
+        val pending = db.itemDao().getPendingLeadFollowUpsDirect(lead.id)
+        pending.forEach { item ->
+            val stepKey = LeadCadenceEngine.parseFollowUpSourceText(item.sourceText)?.second
+            val refreshedTitle = LeadCadenceEngine.buildDueSentence(lead.name, stepKey)
+            db.itemDao().updateItem(
+                item.copy(
+                    title = refreshedTitle,
+                    contactName = lead.name,
+                    details = "Lead (${lead.service}): ${lead.observation.ifBlank { lead.notes }}".trim()
+                )
+            )
+        }
+    }
+
+    suspend fun addLeadNoteEvent(leadId: Long, noteText: String) {
+        val clean = noteText.trim()
+        if (clean.isEmpty()) return
+        db.leadDao().insertEvent(
+            LeadEvent(
+                leadId = leadId,
+                type = "NOTE",
+                text = clean,
+                at = System.currentTimeMillis()
+            )
+        )
+    }
+
+    suspend fun deleteLead(context: Context, lead: Lead) {
+        LeadCadenceEngine.cancelAllPendingForLead(context, db, lead.id)
+        db.leadDao().deleteEventsForLead(lead.id)
+        db.leadDao().deleteLead(lead)
+        AlarmScheduler.syncAlarmTelemetry(context)
+    }
+
+    suspend fun findBestMatchingLead(nameQuery: String): Lead? {
+        val clean = nameQuery.trim()
+        if (clean.isEmpty()) return null
+        db.leadDao().getLeadByExactName(clean)?.let { return it }
+        val candidates = db.leadDao().findLeadsByName(clean)
+        return candidates.firstOrNull {
+            it.name.equals(clean, ignoreCase = true)
+        } ?: candidates.firstOrNull()
+    }
+
+    // --- Message Templates ---
+
+    suspend fun saveMessageTemplate(template: MessageTemplateEntity) {
+        db.messageTemplateDao().upsertTemplate(
+            template.copy(updatedAt = System.currentTimeMillis())
+        )
+    }
+
+    suspend fun resetMessageTemplatesToDefaults() {
+        db.messageTemplateDao().upsertTemplates(LeadCadenceEngine.defaultTemplates())
+    }
+
+    // --- Payments ---
+
+    suspend fun addPayment(
+        clientName: String,
+        amount: Long,
+        type: String,
+        note: String = "",
+        paidAt: Long = System.currentTimeMillis(),
+        explicitLeadId: Long? = null
+    ): Payment {
+        val matchedLead = if (explicitLeadId != null) {
+            db.leadDao().getLeadById(explicitLeadId)
+        } else {
+            findBestMatchingLead(clientName)
+        }
+        val payment = Payment(
+            clientName = clientName.trim(),
+            leadId = matchedLead?.id,
+            amount = amount,
+            type = type.uppercase(Locale.US),
+            paidAt = paidAt,
+            note = note.trim()
+        )
+        val id = db.paymentDao().insertPayment(payment)
+        if (matchedLead != null) {
+            db.leadDao().insertEvent(
+                LeadEvent(
+                    leadId = matchedLead.id,
+                    type = "PAYMENT",
+                    text = "Logged payment of ₦${LeadCadenceEngine.formatWithCommas(amount)} (${payment.type}).",
+                    at = paidAt
+                )
+            )
+        }
+        return payment.copy(id = id)
+    }
+
+    suspend fun updatePayment(payment: Payment) {
+        db.paymentDao().updatePayment(payment)
+    }
+
+    suspend fun deletePayment(payment: Payment) {
+        db.paymentDao().deletePayment(payment)
+    }
+
+    // --- Email Priority & Learning ---
 
     suspend fun promoteEmailToTask(email: UnreadEmailEntity): Long {
         val taskTitle = email.extractedTaskTitle?.takeIf { it.isNotBlank() }
@@ -337,50 +508,126 @@ class AssistantRepository(
         }
     }
 
+    /**
+     * Automatically aggregates weekly targets (50 messages, 5 conversations, 3 quotes) plus wins & cash
+     * from Lead / LeadEvent / Payment records AND daily checklist logs without requiring double entry.
+     */
     suspend fun getWeeklySummary(weekStart: String, weekEnd: String): WeeklySummaryData {
         val goal = db.goalDao().getGoalsDirect() ?: Goal()
         val logs = db.dailyLogDao().getLogsBetweenDates(weekStart, weekEnd)
 
-        var messages = 0
-        var followups = 0
-        var leadsheet = 0
+        var checklistMessages = 0
+        var checklistFollowups = 0
+        var checklistLeadsheet = 0
         var content = 0
         var study = 0
 
         logs.forEach { log ->
             if (log.isDone) {
                 when (log.itemId) {
-                    "messages10" -> messages += if (log.countValue > 0) log.countValue else 10
-                    "followups" -> followups += 1
-                    "leadsheet" -> leadsheet += 1
+                    "messages10" -> checklistMessages += if (log.countValue > 0) log.countValue else 10
+                    "followups" -> checklistFollowups += 1
+                    "leadsheet" -> checklistLeadsheet += 1
                     "content" -> content += 1
                     "study" -> study += 1
                 }
             }
         }
 
+        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val startMs = try {
+            LeadCadenceEngine.startOfDayMillis(sdf.parse(weekStart)?.time ?: System.currentTimeMillis())
+        } catch (_: Exception) {
+            System.currentTimeMillis() - 6L * 86_400_000L
+        }
+        val endMs = try {
+            LeadCadenceEngine.endOfDayMillis(sdf.parse(weekEnd)?.time ?: System.currentTimeMillis())
+        } catch (_: Exception) {
+            System.currentTimeMillis()
+        }
+
+        val weekEvents = db.leadDao().getEventsBetweenDirect(startMs, endMs)
+        val allLeads = db.leadDao().getAllLeadsDirect()
+        val weekCash = db.paymentDao().sumPaymentsBetweenDirect(startMs, endMs)
+
+        // Messages sent from Leads: every MESSAGE_SENT event + any CONTACTED event for leads without a MESSAGE_SENT event yet
+        val messageSentEvents = weekEvents.count { it.type == "MESSAGE_SENT" }
+        val messageSentLeadIds = weekEvents.filter { it.type == "MESSAGE_SENT" }.map { it.leadId }.toSet()
+        val contactedOnlyLeadIds = weekEvents
+            .filter { it.type == "CONTACTED" && it.leadId !in messageSentLeadIds }
+            .map { it.leadId }
+            .toSet()
+        val leadMessagesCount = messageSentEvents + contactedOnlyLeadIds.size
+
+        // Conversations: distinct leads with REPLIED event this week (or imported active replied leads touched this week)
+        val repliedLeadIds = weekEvents
+            .filter { it.type == "REPLIED" }
+            .map { it.leadId }
+            .toMutableSet()
+        allLeads.forEach { lead ->
+            val touchedAt = lead.lastContactAt ?: lead.createdAt
+            if (touchedAt in startMs..endMs && lead.stage in setOf(
+                    LeadCadenceEngine.STAGE_REPLIED,
+                    LeadCadenceEngine.STAGE_QUOTED,
+                    LeadCadenceEngine.STAGE_WON
+                )
+            ) {
+                repliedLeadIds.add(lead.id)
+            }
+        }
+
+        // Quotes: distinct leads with QUOTED event this week (or leads in QUOTED/WON with quoteAmount touched this week)
+        val quotedLeadIds = weekEvents
+            .filter { it.type == "QUOTED" }
+            .map { it.leadId }
+            .toMutableSet()
+        allLeads.forEach { lead ->
+            val touchedAt = lead.lastContactAt ?: lead.createdAt
+            if (touchedAt in startMs..endMs &&
+                (lead.stage == LeadCadenceEngine.STAGE_QUOTED || (lead.stage == LeadCadenceEngine.STAGE_WON && lead.quoteAmount != null))
+            ) {
+                quotedLeadIds.add(lead.id)
+            }
+        }
+
+        // Wins: distinct leads marked WON this week
+        val wonLeadIds = weekEvents
+            .filter { it.type == "WON" }
+            .map { it.leadId }
+            .toMutableSet()
+        allLeads.forEach { lead ->
+            val touchedAt = lead.lastContactAt ?: lead.createdAt
+            if (touchedAt in startMs..endMs && lead.stage == LeadCadenceEngine.STAGE_WON) {
+                wonLeadIds.add(lead.id)
+            }
+        }
+
+        val totalMessages = leadMessagesCount + checklistMessages
+        val totalConversations = if (allLeads.isNotEmpty() || repliedLeadIds.isNotEmpty()) {
+            repliedLeadIds.size
+        } else {
+            checklistFollowups
+        }
+        val totalQuotes = if (allLeads.isNotEmpty() || quotedLeadIds.isNotEmpty()) {
+            quotedLeadIds.size
+        } else {
+            (checklistLeadsheet / 2).coerceAtLeast(0)
+        }
+
         return WeeklySummaryData(
-            messagesCount = messages,
+            messagesCount = totalMessages,
             messagesTarget = goal.weeklyMessagesTarget,
-            conversationsCount = followups,
+            conversationsCount = totalConversations,
             conversationsTarget = goal.weeklyConversationsTarget,
-            quotesCount = (leadsheet / 2).coerceAtLeast(0),
+            quotesCount = totalQuotes,
             quotesTarget = goal.weeklyQuotesTarget,
+            winsCount = wonLeadIds.size,
+            weekCashNgn = weekCash,
             contentCount = content,
             studyCount = study
         )
     }
 
-    /**
-     * Builds the time-aware spoken daily briefing from Room:
-     * - Checks `Calendar.getInstance().get(Calendar.HOUR_OF_DAY)`:
-     *   - 0..11:  "Good morning, King Israel."
-     *   - 12..16: "Good afternoon, King Israel."
-     *   - 17..23: "Good evening, King Israel."
-     * - Queries Room for today's remaining tasks:
-     *   - > 0 left: "You have [X] tasks remaining. Let's focus on [First Task]. What do you want to do first?"
-     *   - 0 left:   "You have cleared all your tasks for today. Excellent work. You should rest."
-     */
     suspend fun buildSpokenDailyPlan(
         overrideGreetingPrefix: String? = null,
         isWakeUpAlarm: Boolean = false
@@ -396,6 +643,10 @@ class AssistantRepository(
         val logs = db.dailyLogDao().getAllLogs()
         val items = db.itemDao().getAllItemsDirect()
         val facts = db.factDao().getAllFactsDirect()
+        val leadsList = db.leadDao().getAllLeadsDirect()
+        val leadEventsList = db.leadDao().getAllEventsDirect()
+        val paymentsList = db.paymentDao().getAllPaymentsDirect()
+        val templatesList = db.messageTemplateDao().getAllTemplatesDirect()
 
         val root = JSONObject()
         val settingsObj = JSONObject().apply {
@@ -407,6 +658,9 @@ class AssistantRepository(
             put("voiceSpeed", prefs.voiceSpeed.toDouble())
             put("yearGoal", goal.yearlyGoal)
             put("startDate", goal.startDate)
+            put("websitePrice", goal.websitePrice)
+            put("retainerPrice", goal.retainerPrice)
+            put("monthlyTarget", goal.monthlyTarget)
         }
         root.put("settings", settingsObj)
 
@@ -456,6 +710,73 @@ class AssistantRepository(
             )
         }
         root.put("facts", factsArr)
+
+        val leadsArr = JSONArray()
+        leadsList.forEach { lead ->
+            leadsArr.put(
+                JSONObject().apply {
+                    put("id", lead.id)
+                    put("name", lead.name)
+                    put("phone", lead.phone)
+                    put("source", lead.source)
+                    put("referredBy", lead.referredBy)
+                    put("stage", lead.stage)
+                    put("service", lead.service)
+                    put("observation", lead.observation)
+                    put("quoteAmount", lead.quoteAmount ?: JSONObject.NULL)
+                    put("notes", lead.notes)
+                    put("createdAt", lead.createdAt)
+                    put("lastContactAt", lead.lastContactAt ?: JSONObject.NULL)
+                    put("nextActionAt", lead.nextActionAt ?: JSONObject.NULL)
+                    put("nextActionType", lead.nextActionType ?: JSONObject.NULL)
+                }
+            )
+        }
+        root.put("leads", leadsArr)
+
+        val eventsArr = JSONArray()
+        leadEventsList.forEach { ev ->
+            eventsArr.put(
+                JSONObject().apply {
+                    put("id", ev.id)
+                    put("leadId", ev.leadId)
+                    put("type", ev.type)
+                    put("text", ev.text)
+                    put("at", ev.at)
+                }
+            )
+        }
+        root.put("leadEvents", eventsArr)
+
+        val paymentsArr = JSONArray()
+        paymentsList.forEach { p ->
+            paymentsArr.put(
+                JSONObject().apply {
+                    put("id", p.id)
+                    put("clientName", p.clientName)
+                    put("leadId", p.leadId ?: JSONObject.NULL)
+                    put("amount", p.amount)
+                    put("type", p.type)
+                    put("paidAt", p.paidAt)
+                    put("note", p.note)
+                }
+            )
+        }
+        root.put("payments", paymentsArr)
+
+        val templatesArr = JSONArray()
+        templatesList.forEach { tpl ->
+            templatesArr.put(
+                JSONObject().apply {
+                    put("stepKey", tpl.stepKey)
+                    put("title", tpl.title)
+                    put("bodyTemplate", tpl.bodyTemplate)
+                    put("orderIndex", tpl.orderIndex)
+                    put("updatedAt", tpl.updatedAt)
+                }
+            )
+        }
+        root.put("messageTemplates", templatesArr)
 
         return root.toString(2)
     }

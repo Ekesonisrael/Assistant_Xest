@@ -260,6 +260,23 @@ object AlarmScheduler {
         recordNextCandidate(context, dueAt, item.title)
     }
 
+    fun cancelItemReminder(context: Context, itemId: Long) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(context, AlarmReceiver::class.java)
+        for (reqCode in listOf(("item_$itemId").hashCode(), ("snooze_$itemId").hashCode())) {
+            val pi = PendingIntent.getBroadcast(
+                context,
+                reqCode,
+                intent,
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+            )
+            if (pi != null) {
+                alarmManager.cancel(pi)
+                pi.cancel()
+            }
+        }
+    }
+
     fun scheduleSnooze(
         context: Context,
         itemId: Long,

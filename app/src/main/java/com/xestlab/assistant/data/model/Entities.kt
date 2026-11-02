@@ -14,7 +14,10 @@ data class Goal(
     val q4Target: Long = 3500000L,
     val weeklyMessagesTarget: Int = 50,
     val weeklyConversationsTarget: Int = 5,
-    val weeklyQuotesTarget: Int = 3
+    val weeklyQuotesTarget: Int = 3,
+    val websitePrice: Long = 250000L,
+    val retainerPrice: Long = 80000L,
+    val monthlyTarget: Long = 850000L
 )
 
 @Entity(tableName = "checklist_items")
@@ -160,3 +163,51 @@ data class CustomEmailTagEntity(
     @PrimaryKey val tagName: String,
     val createdAt: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "leads")
+data class Lead(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val phone: String = "",
+    val source: String = "",
+    val referredBy: String = "",
+    val stage: String = "NEW", // "NEW", "CONTACTED", "REPLIED", "QUOTED", "WON", "LOST"
+    val service: String = "WEBSITE", // "WEBSITE", "SOCIAL", "OTHER"
+    val observation: String = "",
+    val quoteAmount: Long? = null,
+    val notes: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+    val lastContactAt: Long? = null,
+    val nextActionAt: Long? = null,
+    val nextActionType: String? = null
+)
+
+@Entity(tableName = "lead_events")
+data class LeadEvent(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val leadId: Long,
+    val type: String,
+    val text: String,
+    val at: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "message_templates")
+data class MessageTemplateEntity(
+    @PrimaryKey val stepKey: String,
+    val title: String,
+    val bodyTemplate: String,
+    val orderIndex: Int = 0,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "payments")
+data class Payment(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val clientName: String,
+    val leadId: Long? = null,
+    val amount: Long,
+    val type: String = "WEBSITE", // "WEBSITE", "RETAINER", "MAINTENANCE", "OTHER"
+    val paidAt: Long = System.currentTimeMillis(),
+    val note: String = ""
+)
+

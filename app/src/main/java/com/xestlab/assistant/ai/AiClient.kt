@@ -5,8 +5,10 @@ import com.xestlab.assistant.data.LlmProvider
 import com.xestlab.assistant.data.SecurePreferences
 import com.xestlab.assistant.data.UserPreferencesState
 import com.xestlab.assistant.data.local.AppDatabase
+import com.xestlab.assistant.data.model.Lead
 import com.xestlab.assistant.data.model.tagsList
 import com.xestlab.assistant.service.EmailClassificationDecision
+import com.xestlab.assistant.service.LeadCadenceEngine
 import com.xestlab.assistant.service.TtsGreetingHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -123,14 +125,21 @@ object AiClient {
                     }
                 }.thenByDescending { it.receivedAt }
             )
-        val goal = db.goalDao().getGoalsDirect()
+        val goal = db.goalDao().getGoalsDirect() ?: com.xestlab.assistant.data.model.Goal()
+        val allLeads = db.leadDao().getAllLeadsDirect()
+        val allPendingRaw = db.itemDao().getPendingItemsDirect()
+        val dueFollowUps = LeadCadenceEngine.computeDueFollowUpsToday(allLeads, allPendingRaw)
+        val payments = db.paymentDao().getAllPaymentsDirect()
+        val gauge = LeadCadenceEngine.computeRevenueGauge(goal, payments)
 
         return buildString {
             appendLine("User Name: ${prefs.userName.ifBlank { "King Israel" }}")
             appendLine("Today's Date: $todayVerbose")
             appendLine("Tomorrow's Date: $tomorrowVerbose")
-            if (goal != null) {
-                appendLine("Annual Revenue Target: NGN ${String.format(Locale.US, "%,d", goal.yearlyGoal)}")
+            appendLine("Annual Revenue Gauge: ${gauge.homeGaugeLine}")
+            if (dueFollowUps.isNotEmpty()) {
+                appendLine("Lead Follow-Ups Due Today (${dueFollowUps.size}):")
+                dueFollowUps.take(10).forEach { due -> appendLine("- ${due.displayLine}") }
             }
             val highCount = unreadEmails.count { it.priority == "HIGH" }
             val normalCount = unreadEmails.count { it.priority == "NORMAL" }
@@ -269,7 +278,60 @@ object AiClient {
         securePrefs: SecurePreferences
     ): String {
         val displayName = prefs.userName.ifBlank { "King Israel" }
-        return TtsGreetingHelper.buildDynamicBriefing(db, displayName)
+        return TtsGreetingHelper.buildDynamicBriefing(db, displayName, briefingTitle)
+    }
+
+    /**
+     * Rewrites a WhatsApp lead follow-up draft using the lead's observation in a short, friendly
+     * Nigerian business tone via Groq ("openai/gpt-oss-120b"). Returns null on failure so the
+     * caller falls back seamlessly to the offline editable template.
+     */
+    suspend fun rewriteLeadDraftViaGroq(
+        lead: Lead,
+        stepKey: String,
+        offlineDraft: String,
+        securePrefs: SecurePreferences
+    ): String? = withContext(Dispatchers.IO) {
+        if (!securePrefs.isAiEnabled || !securePrefs.hasGroqKey()) return@withContext null
+        val key = securePrefs.getKeyForProvider(LlmProvider.GROQ) ?: return@withContext null
+
+        try {
+            val systemPrompt = buildString {
+                appendLine("You write short, warm, natural WhatsApp outreach and follow-up messages for King Israel in a friendly Nigerian business tone.")
+                appendLine("Keep it concise (2 to 4 sentences max), respectful, human, and direct — never pushy, robotic, or overly formal.")
+                appendLine("Do not use hashtags, markdown, bullet points, or quotation marks around the message.")
+                if (stepKey == LeadCadenceEngine.STEP_DAY_0_MESSAGE) {
+                    appendLine("CRITICAL: This is the first message (Day 0). You MUST naturally include the specific observation about their page or website.")
+                }
+                append("Output ONLY the ready-to-send WhatsApp message text.")
+            }
+
+            val userPrompt = buildString {
+                appendLine("Lead Name: ${lead.name}")
+                appendLine("Service: ${LeadCadenceEngine.serviceReadableLabel(lead.service)}")
+                appendLine("Cadence Step: ${LeadCadenceEngine.stepShortLabel(stepKey)}")
+                if (lead.observation.isNotBlank()) {
+                    appendLine("Specific Observation: ${lead.observation}")
+                }
+                lead.quoteAmount?.let {
+                    appendLine("Quote Amount: NGN ${String.format(Locale.US, "%,d", it)}")
+                }
+                appendLine("Base Template Draft: $offlineDraft")
+                append("Rewrite this draft naturally using the observation above.")
+            }
+
+            val reply = executeGroqPost(
+                rawApiKey = key,
+                systemPrompt = systemPrompt,
+                userText = userPrompt
+            ).getOrNull()?.replyText?.trim()?.trim('"') ?: return@withContext null
+
+            if (reply.isBlank()) return@withContext null
+            reply
+        } catch (e: Exception) {
+            Log.w(TAG, "Lead draft AI rewrite failed, using offline template: ${e.message}")
+            null
+        }
     }
 
     /**

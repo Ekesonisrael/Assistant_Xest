@@ -246,7 +246,21 @@ class PersonActionReceiver : BroadcastReceiver() {
                     val pendingResult = goAsync()
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
-                            AppDatabase.getInstance(context).itemDao().updateStatus(itemId, "COMPLETED")
+                            val db = AppDatabase.getInstance(context)
+                            val item = db.itemDao().getItemById(itemId)
+                            val parsedFollowUp = item?.let {
+                                LeadCadenceEngine.parseFollowUpSourceText(it.sourceText)
+                            }
+                            if (parsedFollowUp != null) {
+                                LeadCadenceEngine.completeDueFollowUpStep(
+                                    context = context,
+                                    db = db,
+                                    leadId = parsedFollowUp.first,
+                                    reminderItemId = itemId
+                                )
+                            } else {
+                                db.itemDao().updateStatus(itemId, "COMPLETED")
+                            }
                         } finally {
                             pendingResult.finish()
                         }
@@ -259,14 +273,40 @@ class PersonActionReceiver : BroadcastReceiver() {
                 }
             }
             ACTION_OPEN_CHAT -> {
-                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, "Hi ${contactName ?: ""}, following up: ")
+                val pendingResult = goAsync()
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        val db = AppDatabase.getInstance(context)
+                        val item = if (itemId > 0L) db.itemDao().getItemById(itemId) else null
+                        val parsedFollowUp = item?.let {
+                            LeadCadenceEngine.parseFollowUpSourceText(it.sourceText)
+                        }
+                        if (parsedFollowUp != null) {
+                            val lead = db.leadDao().getLeadById(parsedFollowUp.first)
+                            if (lead != null) {
+                                val securePrefs = SecurePreferences(context)
+                                val draft = LeadCadenceEngine.buildDraftForLead(
+                                    db = db,
+                                    securePrefs = securePrefs,
+                                    lead = lead,
+                                    stepKey = parsedFollowUp.second
+                                )
+                                LeadCadenceEngine.openWhatsAppWithDraft(context, lead.phone, draft)
+                                return@launch
+                            }
+                        }
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, "Hi ${contactName ?: ""}, following up: ")
+                        }
+                        val chooser = Intent.createChooser(shareIntent, "Message ${contactName ?: "Contact"}").apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(chooser)
+                    } finally {
+                        pendingResult.finish()
+                    }
                 }
-                val chooser = Intent.createChooser(shareIntent, "Message ${contactName ?: "Contact"}").apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(chooser)
             }
         }
     }

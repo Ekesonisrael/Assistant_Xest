@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -51,6 +52,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.xestlab.assistant.data.SecurePreferences
 import com.xestlab.assistant.service.WakeWordService
 import com.xestlab.assistant.ui.screens.HomeScreen
+import com.xestlab.assistant.ui.screens.LeadsScreen
+import com.xestlab.assistant.ui.screens.MessageTemplatesScreen
 import com.xestlab.assistant.ui.screens.NotesScreen
 import com.xestlab.assistant.ui.screens.PlanScreen
 import com.xestlab.assistant.ui.screens.PrioritySendersScreen
@@ -129,6 +132,7 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
     var currentTab by rememberSaveable { mutableIntStateOf(0) }
     var showSetupOverlay by rememberSaveable { mutableStateOf(false) }
     var showPriorityRulesOverlay by rememberSaveable { mutableStateOf(false) }
+    var showMessageTemplatesOverlay by rememberSaveable { mutableStateOf(false) }
 
     val prefs = loadedPrefs
     if (prefs == null) {
@@ -165,11 +169,20 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
         return
     }
 
+    if (showMessageTemplatesOverlay) {
+        MessageTemplatesScreen(
+            viewModel = viewModel,
+            onClose = { showMessageTemplatesOverlay = false }
+        )
+        return
+    }
+
     val isKeyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
 
     val tabs = listOf(
         NavTab("Home", Icons.Default.Home),
         NavTab("Plan", Icons.Default.DateRange),
+        NavTab("Leads", Icons.Default.Person),
         NavTab("Notes", Icons.Default.Info),
         NavTab("Settings", Icons.Default.Settings)
     )
@@ -252,11 +265,13 @@ private fun AssistantRootApp(viewModel: AssistantViewModel) {
                 when (currentTab) {
                     0 -> HomeScreen(viewModel = viewModel)
                     1 -> PlanScreen(viewModel = viewModel)
-                    2 -> NotesScreen(viewModel = viewModel)
-                    3 -> SettingsScreen(
+                    2 -> LeadsScreen(viewModel = viewModel)
+                    3 -> NotesScreen(viewModel = viewModel)
+                    4 -> SettingsScreen(
                         viewModel = viewModel,
                         onOpenSetup = { showSetupOverlay = true },
-                        onOpenPriorityRules = { showPriorityRulesOverlay = true }
+                        onOpenPriorityRules = { showPriorityRulesOverlay = true },
+                        onOpenMessageTemplates = { showMessageTemplatesOverlay = true }
                     )
                 }
             }

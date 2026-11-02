@@ -5,6 +5,7 @@ import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
 import com.xestlab.assistant.data.model.ChecklistItem
 import com.xestlab.assistant.data.model.ConversationTurn
 import com.xestlab.assistant.data.model.CustomEmailTagEntity
@@ -13,6 +14,10 @@ import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Fact
 import com.xestlab.assistant.data.model.Goal
 import com.xestlab.assistant.data.model.Item
+import com.xestlab.assistant.data.model.Lead
+import com.xestlab.assistant.data.model.LeadEvent
+import com.xestlab.assistant.data.model.MessageTemplateEntity
+import com.xestlab.assistant.data.model.Payment
 import com.xestlab.assistant.data.model.ReminderSchedule
 import com.xestlab.assistant.data.model.UnreadEmailEntity
 import com.xestlab.assistant.data.model.UserSettings
@@ -137,6 +142,12 @@ interface ItemDao {
     )
     suspend fun getRemainingTasksForTodayDirect(endOfTodayMillis: Long): List<Item>
 
+    @Query("SELECT * FROM items WHERE status = 'PENDING' AND sourceText LIKE 'lead_followup:' || :leadId || ':%' ORDER BY CASE WHEN dueAt IS NULL THEN 1 ELSE 0 END, dueAt ASC")
+    suspend fun getPendingLeadFollowUpsDirect(leadId: Long): List<Item>
+
+    @Query("SELECT * FROM items WHERE status = 'PENDING' AND sourceText LIKE 'lead_followup:%' ORDER BY CASE WHEN dueAt IS NULL THEN 1 ELSE 0 END, dueAt ASC")
+    suspend fun getAllPendingLeadFollowUpsDirect(): List<Item>
+
     @Query("SELECT * FROM items WHERE type = 'NOTE' AND (title LIKE '%' || :query || '%' OR details LIKE '%' || :query || '%') ORDER BY createdAt DESC")
     fun searchNotes(query: String): Flow<List<Item>>
 
@@ -151,6 +162,9 @@ interface ItemDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertItems(items: List<Item>)
+
+    @Update
+    suspend fun updateItem(item: Item)
 
     @Query("UPDATE items SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: Long, status: String)
@@ -276,4 +290,103 @@ interface EmailRuleDao {
 
     @Query("DELETE FROM email_custom_tags WHERE tagName = :tagName")
     suspend fun deleteCustomTag(tagName: String)
+}
+
+@Dao
+interface LeadDao {
+    @Query("SELECT * FROM leads ORDER BY CASE WHEN nextActionAt IS NULL THEN 1 ELSE 0 END ASC, nextActionAt ASC, createdAt DESC")
+    fun observeAllLeads(): Flow<List<Lead>>
+
+    @Query("SELECT * FROM leads ORDER BY CASE WHEN nextActionAt IS NULL THEN 1 ELSE 0 END ASC, nextActionAt ASC, createdAt DESC")
+    suspend fun getAllLeadsDirect(): List<Lead>
+
+    @Query("SELECT * FROM leads WHERE id = :id LIMIT 1")
+    suspend fun getLeadById(id: Long): Lead?
+
+    @Query("SELECT * FROM leads WHERE LOWER(name) = LOWER(:name) LIMIT 1")
+    suspend fun getLeadByExactName(name: String): Lead?
+
+    @Query("SELECT * FROM leads WHERE LOWER(name) LIKE '%' || LOWER(:query) || '%' ORDER BY createdAt DESC")
+    suspend fun findLeadsByName(query: String): List<Lead>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertLead(lead: Lead): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertLeads(leads: List<Lead>)
+
+    @Update
+    suspend fun updateLead(lead: Lead)
+
+    @Delete
+    suspend fun deleteLead(lead: Lead)
+
+    @Query("SELECT * FROM lead_events ORDER BY at DESC")
+    fun observeAllEvents(): Flow<List<LeadEvent>>
+
+    @Query("SELECT * FROM lead_events WHERE leadId = :leadId ORDER BY at DESC")
+    fun observeEventsForLead(leadId: Long): Flow<List<LeadEvent>>
+
+    @Query("SELECT * FROM lead_events WHERE leadId = :leadId ORDER BY at DESC")
+    suspend fun getEventsForLeadDirect(leadId: Long): List<LeadEvent>
+
+    @Query("SELECT * FROM lead_events ORDER BY at DESC")
+    suspend fun getAllEventsDirect(): List<LeadEvent>
+
+    @Query("SELECT * FROM lead_events WHERE at BETWEEN :startMillis AND :endMillis ORDER BY at DESC")
+    suspend fun getEventsBetweenDirect(startMillis: Long, endMillis: Long): List<LeadEvent>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEvent(event: LeadEvent): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEvents(events: List<LeadEvent>)
+
+    @Query("DELETE FROM lead_events WHERE leadId = :leadId")
+    suspend fun deleteEventsForLead(leadId: Long)
+}
+
+@Dao
+interface MessageTemplateDao {
+    @Query("SELECT * FROM message_templates ORDER BY orderIndex ASC")
+    fun observeAllTemplates(): Flow<List<MessageTemplateEntity>>
+
+    @Query("SELECT * FROM message_templates ORDER BY orderIndex ASC")
+    suspend fun getAllTemplatesDirect(): List<MessageTemplateEntity>
+
+    @Query("SELECT * FROM message_templates WHERE stepKey = :stepKey LIMIT 1")
+    suspend fun getTemplateDirect(stepKey: String): MessageTemplateEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertTemplate(template: MessageTemplateEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertTemplates(templates: List<MessageTemplateEntity>)
+}
+
+@Dao
+interface PaymentDao {
+    @Query("SELECT * FROM payments ORDER BY paidAt DESC")
+    fun observeAllPayments(): Flow<List<Payment>>
+
+    @Query("SELECT * FROM payments ORDER BY paidAt DESC")
+    suspend fun getAllPaymentsDirect(): List<Payment>
+
+    @Query("SELECT * FROM payments WHERE paidAt BETWEEN :startMillis AND :endMillis ORDER BY paidAt DESC")
+    suspend fun getPaymentsBetweenDirect(startMillis: Long, endMillis: Long): List<Payment>
+
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE paidAt BETWEEN :startMillis AND :endMillis")
+    suspend fun sumPaymentsBetweenDirect(startMillis: Long, endMillis: Long): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPayment(payment: Payment): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPayments(payments: List<Payment>)
+
+    @Update
+    suspend fun updatePayment(payment: Payment)
+
+    @Delete
+    suspend fun deletePayment(payment: Payment)
 }

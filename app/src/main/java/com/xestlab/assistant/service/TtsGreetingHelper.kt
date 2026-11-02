@@ -97,19 +97,68 @@ object TtsGreetingHelper {
     /**
      * Builds the complete time-aware spoken daily briefing from Room:
      * - Greeting based on `Calendar.HOUR_OF_DAY` (0-11 morning, 12-16 afternoon, 17-23 evening)
+     * - Morning / Daytime briefing shows follow-ups due today by name (e.g. "Tola is due a day 2 voice note.")
+     * - Evening review mentions cash logged today, gap against the month target, and active leads with
+     *   no next action for more than 7 days ("Needs attention").
      * - High and Normal non-dismissed unread emails appear in the daily briefing; Low emails are only counted.
-     * - If tasks remain:
-     *   "You have [X] tasks remaining. Let's focus on [First Task]. ... What do you want to do first?"
-     * - If ZERO tasks remain:
-     *   "You have cleared all your tasks for today. Excellent work. ... You should rest."
      */
     suspend fun buildDynamicBriefing(
         db: AppDatabase,
-        userName: String = "King Israel"
+        userName: String = "King Israel",
+        briefingTitle: String? = null
     ): String {
-        val greeting = getTimeAwareGreeting(userName)
+        val nowMillis = System.currentTimeMillis()
+        val hourOfDay = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val isEveningReview = (briefingTitle?.contains("evening", ignoreCase = true) == true) || hourOfDay >= 18
+
+        val greeting = getTimeAwareGreeting(userName, hourOfDay)
         val remainingTitles = getRemainingTaskTitlesForToday(db)
         val remainingCount = remainingTitles.size
+
+        val allLeads = db.leadDao().getAllLeadsDirect()
+        val allPending = db.itemDao().getPendingItemsDirect()
+        val dueFollowUps = LeadCadenceEngine.computeDueFollowUpsToday(allLeads, allPending, nowMillis)
+
+        val followUpSegment = if (dueFollowUps.isNotEmpty()) {
+            val preview = dueFollowUps.take(5).joinToString(" ") { it.displayLine }
+            val extra = if (dueFollowUps.size > 5) " Plus ${dueFollowUps.size - 5} more due today." else ""
+            "Follow-ups due today: $preview$extra"
+        } else {
+            ""
+        }
+
+        val eveningSegment = if (isEveningReview) {
+            val goal = db.goalDao().getGoalsDirect() ?: com.xestlab.assistant.data.model.Goal()
+            val payments = db.paymentDao().getAllPaymentsDirect()
+            val gauge = LeadCadenceEngine.computeRevenueGauge(goal, payments, nowMillis)
+            val staleLeads = LeadCadenceEngine.computeNeedsAttentionLeads(allLeads, nowMillis)
+
+            val cashSentence = if (gauge.todayCash > 0L) {
+                "Cash logged today: ${LeadCadenceEngine.formatCompactNaira(gauge.todayCash)}. " +
+                    if (gauge.monthGap > 0L) {
+                        "Month gap remaining is ${LeadCadenceEngine.formatCompactNaira(gauge.monthGap)} against your ${LeadCadenceEngine.formatCompactNaira(gauge.monthTarget)} monthly target."
+                    } else {
+                        "You have hit your ${LeadCadenceEngine.formatCompactNaira(gauge.monthTarget)} monthly target."
+                    }
+            } else {
+                "Cash logged today: 0 naira. " +
+                    if (gauge.monthGap > 0L) {
+                        "Gap against your ${LeadCadenceEngine.formatCompactNaira(gauge.monthTarget)} monthly target is ${LeadCadenceEngine.formatCompactNaira(gauge.monthGap)}."
+                    } else {
+                        "Your monthly target of ${LeadCadenceEngine.formatCompactNaira(gauge.monthTarget)} is already covered."
+                    }
+            }
+
+            val staleSentence = if (staleLeads.isNotEmpty()) {
+                val names = staleLeads.take(5).joinToString(", ") { it.name }
+                "Needs attention: ${staleLeads.size} active ${if (staleLeads.size == 1) "lead has" else "leads have"} had no next action for over 7 days ($names)."
+            } else {
+                ""
+            }
+            listOf(cashSentence, staleSentence).filter { it.isNotBlank() }.joinToString(" ")
+        } else {
+            ""
+        }
 
         val activeEmails = db.emailDao().getActiveUnreadDirect(50)
         val highEmails = activeEmails.filter { it.priority == "HIGH" }
@@ -132,17 +181,21 @@ object TtsGreetingHelper {
             }
         }.joinToString(" ")
 
+        val extraSegments = listOf(followUpSegment, eveningSegment, emailBriefingSegment)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+
         return if (remainingCount > 0) {
             val firstTask = remainingTitles.first()
             val taskNoun = if (remainingCount == 1) "task" else "tasks"
-            if (emailBriefingSegment.isNotBlank()) {
-                "$greeting You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. $emailBriefingSegment What do you want to do first?"
+            if (extraSegments.isNotBlank()) {
+                "$greeting You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. $extraSegments What do you want to do first?"
             } else {
                 "$greeting You have $remainingCount $taskNoun remaining. Let's focus on $firstTask. What do you want to do first?"
             }
         } else {
-            if (emailBriefingSegment.isNotBlank()) {
-                "$greeting You have cleared all your tasks for today. Excellent work. $emailBriefingSegment You should rest."
+            if (extraSegments.isNotBlank()) {
+                "$greeting You have cleared all your tasks for today. Excellent work. $extraSegments You should rest."
             } else {
                 "$greeting You have cleared all your tasks for today. Excellent work. You should rest."
             }

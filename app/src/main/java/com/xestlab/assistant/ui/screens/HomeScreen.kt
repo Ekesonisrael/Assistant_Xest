@@ -44,6 +44,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -83,9 +84,11 @@ import com.xestlab.assistant.data.model.ConversationTurn
 import com.xestlab.assistant.data.model.CustomEmailTagEntity
 import com.xestlab.assistant.data.model.EmailSenderRuleEntity
 import com.xestlab.assistant.data.model.Item
+import com.xestlab.assistant.data.model.Lead
 import com.xestlab.assistant.data.model.UnreadEmailEntity
 import com.xestlab.assistant.data.model.tagsList
 import com.xestlab.assistant.service.EmailPriorityEngine
+import com.xestlab.assistant.service.LeadCadenceEngine
 import com.xestlab.assistant.service.TtsGreetingHelper
 import com.xestlab.assistant.service.WakeWordService
 import com.xestlab.assistant.ui.theme.BgDark
@@ -99,6 +102,7 @@ import com.xestlab.assistant.ui.theme.TextMutedDark
 import com.xestlab.assistant.ui.theme.TextPrimaryDark
 import com.xestlab.assistant.ui.theme.WarningRed
 import com.xestlab.assistant.ui.viewmodel.AssistantViewModel
+import com.xestlab.assistant.ui.viewmodel.PendingConfirmation
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -121,6 +125,9 @@ fun HomeScreen(viewModel: AssistantViewModel) {
     val unreadEmails by viewModel.unreadEmails.collectAsState()
     val senderRules by viewModel.senderRules.collectAsState()
     val customEmailTags by viewModel.customEmailTags.collectAsState()
+    val dueFollowUpsToday by viewModel.dueFollowUpsToday.collectAsState()
+    val revenueGauge by viewModel.revenueGauge.collectAsState()
+    val pendingConfirmation by viewModel.pendingConfirmation.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
     var isListening by remember { mutableStateOf(false) }
@@ -129,6 +136,8 @@ fun HomeScreen(viewModel: AssistantViewModel) {
     var sentMessageCounter by remember { mutableIntStateOf(0) }
     var lowPriorityExpanded by rememberSaveable { mutableStateOf(false) }
     var taggingEmailId by rememberSaveable { mutableStateOf<String?>(null) }
+    var leadFromEmailId by rememberSaveable { mutableStateOf<String?>(null) }
+    var observationPromptTarget by remember { mutableStateOf<Pair<Lead, String?>?>(null) }
 
     val listState = rememberLazyListState()
     val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
@@ -306,7 +315,10 @@ fun HomeScreen(viewModel: AssistantViewModel) {
         checklistItems.count { logMap[it.id]?.isDone == true }
     }
     val nextUpItem = remember(pendingItems) {
-        pendingItems.firstOrNull { !it.sourceText.startsWith("web_pipeline_") }
+        pendingItems.firstOrNull {
+            !it.sourceText.startsWith("web_pipeline_") &&
+                !it.sourceText.startsWith("lead_followup:")
+        }
     }
     val visibleEmails = remember(unreadEmails) {
         unreadEmails.filter { !it.dismissedInApp }
@@ -334,6 +346,44 @@ fun HomeScreen(viewModel: AssistantViewModel) {
             onToggleTag = { tag -> viewModel.toggleEmailTag(activeTagEmail, tag) },
             onCreateCustomTag = { customTag -> viewModel.createAndApplyCustomTag(activeTagEmail, customTag) },
             onDismiss = { taggingEmailId = null }
+        )
+    }
+
+    val activeLeadEmail = remember(leadFromEmailId, unreadEmails) {
+        leadFromEmailId?.let { targetId -> unreadEmails.firstOrNull { it.id == targetId } }
+    }
+    if (activeLeadEmail != null) {
+        AddLeadFromEmailDialog(
+            email = activeLeadEmail,
+            onSave = { name, service, phone, observation ->
+                viewModel.createLeadFromEmail(
+                    email = activeLeadEmail,
+                    name = name,
+                    service = service,
+                    phone = phone,
+                    observation = observation
+                )
+                leadFromEmailId = null
+            },
+            onDismiss = { leadFromEmailId = null }
+        )
+    }
+
+    if (observationPromptTarget != null) {
+        val (targetLead, targetStep) = observationPromptTarget!!
+        ObservationPromptDialog(
+            leadName = targetLead.name,
+            initialObservation = targetLead.observation,
+            onConfirmAndOpenWhatsApp = { enteredObs ->
+                observationPromptTarget = null
+                viewModel.openLeadWhatsAppWithDraft(
+                    activityContext = context,
+                    lead = targetLead,
+                    stepKey = targetStep,
+                    updatedObservation = enteredObs
+                )
+            },
+            onDismiss = { observationPromptTarget = null }
         )
     }
 
@@ -383,6 +433,38 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 }
             }
 
+            // 1b. 10M Revenue Gauge Card
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = CardShape8,
+                    colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                    border = BorderStroke(1.dp, BorderDark)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "10 MILLION GAUGE",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TealAccent
+                        )
+                        Text(
+                            text = revenueGauge.homeGaugeLine,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextPrimaryDark
+                        )
+                        LinearProgressIndicator(
+                            progress = { (revenueGauge.percentOfGoal.toFloat() / 100f).coerceIn(0f, 1f) },
+                            color = TealAccent,
+                            trackColor = SurfaceSubtleDark,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
             // 2. Centered Microphone Hero Section
             item {
                 CenteredMicrophoneHero(
@@ -413,6 +495,18 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                     },
                     onStopSpeech = { viewModel.stopSpeaking() }
                 )
+            }
+
+            // 2b. Voice / Chat Action Confirmation Card (Leads & Payments)
+            pendingConfirmation?.let { pending ->
+                item {
+                    PendingActionConfirmationCard(
+                        pending = pending,
+                        onConfirm = { viewModel.confirmPendingAction(alsoMarkLeadWon = false) },
+                        onConfirmAndMarkWon = { viewModel.confirmPendingAction(alsoMarkLeadWon = true) },
+                        onCancel = { viewModel.cancelPendingConfirmation() }
+                    )
+                }
             }
 
             // 3. Daily Plan Briefing Card
@@ -530,6 +624,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                                         email = email,
                                         isPrioritySender = isPrioritySender,
                                         onAddToTasks = { viewModel.promoteEmailToTask(email) },
+                                        onAddLead = { leadFromEmailId = email.id },
                                         onOpenTagPicker = { taggingEmailId = email.id },
                                         onTogglePrioritySender = { viewModel.togglePrioritySender(email) },
                                         onDismissInApp = { viewModel.dismissEmailInAppOnly(email) },
@@ -552,6 +647,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                                         email = email,
                                         isPrioritySender = isPrioritySender,
                                         onAddToTasks = { viewModel.promoteEmailToTask(email) },
+                                        onAddLead = { leadFromEmailId = email.id },
                                         onOpenTagPicker = { taggingEmailId = email.id },
                                         onTogglePrioritySender = { viewModel.togglePrioritySender(email) },
                                         onDismissInApp = { viewModel.dismissEmailInAppOnly(email) },
@@ -598,6 +694,7 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                                             email = email,
                                             isPrioritySender = isPrioritySender,
                                             onAddToTasks = { viewModel.promoteEmailToTask(email) },
+                                            onAddLead = { leadFromEmailId = email.id },
                                             onOpenTagPicker = { taggingEmailId = email.id },
                                             onTogglePrioritySender = { viewModel.togglePrioritySender(email) },
                                             onDismissInApp = { viewModel.dismissEmailInAppOnly(email) },
@@ -622,7 +719,41 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                 }
             }
 
-            // 6. Next Up Card
+            // 6. Next Up Section (Lead Follow-Ups Due Today by Name + Scheduled Task/Reminder)
+            if (dueFollowUpsToday.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "NEXT UP — FOLLOW-UPS DUE TODAY (${dueFollowUpsToday.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TealAccent,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                items(dueFollowUpsToday, key = { "home_due_${it.lead.id}_${it.stepKey}" }) { due ->
+                    DueFollowUpActionCard(
+                        due = due,
+                        onOpenWhatsApp = {
+                            if (due.stepKey == LeadCadenceEngine.STEP_DAY_0_MESSAGE &&
+                                due.lead.observation.isBlank()
+                            ) {
+                                observationPromptTarget = due.lead to due.stepKey
+                            } else {
+                                viewModel.openLeadWhatsAppWithDraft(
+                                    activityContext = context,
+                                    lead = due.lead,
+                                    stepKey = due.stepKey
+                                )
+                            }
+                        },
+                        onCall = { viewModel.callLead(context, due.lead) },
+                        onMarkDone = { viewModel.completeDueFollowUp(due) },
+                        onSnooze = { viewModel.snoozeDueFollowUp(due) },
+                        onReplied = { viewModel.markLeadReplied(due.lead.id) },
+                        onLost = { viewModel.markLeadLost(due.lead.id) }
+                    )
+                }
+            }
+
             if (nextUpItem != null) {
                 item {
                     NextUpCard(
@@ -898,6 +1029,7 @@ private fun RankedUnreadEmailCard(
     email: UnreadEmailEntity,
     isPrioritySender: Boolean,
     onAddToTasks: () -> Unit,
+    onAddLead: () -> Unit,
     onOpenTagPicker: () -> Unit,
     onTogglePrioritySender: () -> Unit,
     onDismissInApp: () -> Unit,
@@ -1066,10 +1198,24 @@ private fun RankedUnreadEmailCard(
                     shape = CardShape8,
                     border = BorderStroke(1.dp, TealAccent),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(0.8f)
                 ) {
                     Text(
                         text = if (tags.isEmpty()) "Tag" else "Tag (${tags.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TealAccent
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onAddLead,
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, TealAccent),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(0.9f)
+                ) {
+                    Text(
+                        text = "Add Lead",
                         style = MaterialTheme.typography.labelMedium,
                         color = TealAccent
                     )
@@ -1113,6 +1259,206 @@ private fun RankedUnreadEmailCard(
             }
         }
     }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PendingActionConfirmationCard(
+    pending: PendingConfirmation,
+    onConfirm: () -> Unit,
+    onConfirmAndMarkWon: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = CardShape8,
+        colors = CardDefaults.cardColors(containerColor = TealAccentContainer),
+        border = BorderStroke(1.dp, TealAccent)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "CONFIRM VOICE / CHAT ACTION",
+                style = MaterialTheme.typography.labelMedium,
+                color = TealAccent,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = pending.promptText,
+                style = MaterialTheme.typography.bodyLarge,
+                color = TextPrimaryDark
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onConfirm,
+                    shape = CardShape8,
+                    colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
+                ) {
+                    Text("Confirm", color = BgDark, fontWeight = FontWeight.SemiBold)
+                }
+                if (pending is PendingConfirmation.LogPayment && pending.canMarkWon) {
+                    Button(
+                        onClick = onConfirmAndMarkWon,
+                        shape = CardShape8,
+                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
+                    ) {
+                        Text(
+                            "Confirm & Mark ${pending.matchedLeadName ?: "Lead"} Won",
+                            color = BgDark,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+                OutlinedButton(
+                    onClick = onCancel,
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, WarningRed)
+                ) {
+                    Text("Cancel", color = WarningRed)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddLeadFromEmailDialog(
+    email: UnreadEmailEntity,
+    onSave: (name: String, service: String, phone: String, observation: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val defaultName = remember(email.sender) {
+        email.sender.substringBefore("<").trim().trim('"').ifBlank { email.sender }
+    }
+    var name by remember(defaultName) { mutableStateOf(defaultName) }
+    var service by remember { mutableStateOf(LeadCadenceEngine.SERVICE_WEBSITE) }
+    var phone by remember { mutableStateOf("") }
+    var observation by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceDark,
+        title = {
+            Text("Add Lead from Email", color = TextPrimaryDark)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Only Name and Service are required.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextMutedDark
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimaryDark),
+                    label = { Text("Lead Name *") },
+                    singleLine = true,
+                    shape = CardShape8,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = SurfaceSubtleDark,
+                        unfocusedContainerColor = SurfaceSubtleDark,
+                        focusedBorderColor = TealAccent,
+                        unfocusedBorderColor = BorderDark,
+                        focusedTextColor = TextPrimaryDark,
+                        unfocusedTextColor = TextPrimaryDark,
+                        cursorColor = TealAccent
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    LeadCadenceEngine.ALL_SERVICES.forEach { svc ->
+                        val selected = service == svc
+                        if (selected) {
+                            Button(
+                                onClick = { service = svc },
+                                shape = CardShape8,
+                                colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(svc, color = BgDark, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = { service = svc },
+                                shape = CardShape8,
+                                border = BorderStroke(1.dp, BorderDark),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(svc, color = TextPrimaryDark, style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = phone,
+                    onValueChange = { phone = it },
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimaryDark),
+                    label = { Text("Phone (optional)") },
+                    singleLine = true,
+                    shape = CardShape8,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = SurfaceSubtleDark,
+                        unfocusedContainerColor = SurfaceSubtleDark,
+                        focusedBorderColor = TealAccent,
+                        unfocusedBorderColor = BorderDark,
+                        focusedTextColor = TextPrimaryDark,
+                        unfocusedTextColor = TextPrimaryDark,
+                        cursorColor = TealAccent
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = observation,
+                    onValueChange = { observation = it },
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimaryDark),
+                    label = { Text("Observation (optional)") },
+                    singleLine = false,
+                    maxLines = 2,
+                    shape = CardShape8,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = SurfaceSubtleDark,
+                        unfocusedContainerColor = SurfaceSubtleDark,
+                        focusedBorderColor = TealAccent,
+                        unfocusedBorderColor = BorderDark,
+                        focusedTextColor = TextPrimaryDark,
+                        unfocusedTextColor = TextPrimaryDark,
+                        cursorColor = TealAccent
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (name.trim().isNotEmpty()) {
+                        onSave(name.trim(), service, phone.trim(), observation.trim())
+                    }
+                },
+                enabled = name.trim().isNotEmpty(),
+                shape = CardShape8,
+                colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
+            ) {
+                Text("Add Lead", color = BgDark, fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = TextMutedDark)
+            }
+        }
+    )
 }
 
 @OptIn(ExperimentalLayoutApi::class)

@@ -103,7 +103,8 @@ import java.util.Locale
 fun SettingsScreen(
     viewModel: AssistantViewModel,
     onOpenSetup: () -> Unit,
-    onOpenPriorityRules: () -> Unit = {}
+    onOpenPriorityRules: () -> Unit = {},
+    onOpenMessageTemplates: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val settingsListState = rememberLazyListState()
@@ -177,6 +178,10 @@ fun SettingsScreen(
     var voiceDropdownExpanded by remember { mutableStateOf(false) }
 
     var yearlyGoalField by remember(goals.yearlyGoal) { mutableStateOf(goals.yearlyGoal.toString()) }
+    var startDateField by remember(goals.startDate) { mutableStateOf(goals.startDate) }
+    var monthlyTargetField by remember(goals.monthlyTarget) { mutableStateOf(goals.monthlyTarget.toString()) }
+    var websitePriceField by remember(goals.websitePrice) { mutableStateOf(goals.websitePrice.toString()) }
+    var retainerPriceField by remember(goals.retainerPrice) { mutableStateOf(goals.retainerPrice.toString()) }
     var customBriefTitle by remember { mutableStateOf("") }
     var customBriefTime by remember { mutableStateOf("15:00") }
 
@@ -1461,9 +1466,22 @@ fun SettingsScreen(
             }
         }
 
-        // 6. Memory, JSON Pipeline Import & Diagnostics
+        // 6. Memory, Message Templates, JSON Pipeline Import & 10M Goal Pricing
         item {
-            SettingsCard(title = "MEMORY, JSON PIPELINE IMPORT & BACKUP") {
+            SettingsCard(title = "TEMPLATES, MEMORY, JSON PIPELINE IMPORT & 10M GOAL") {
+                OutlinedButton(
+                    onClick = onOpenMessageTemplates,
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, TealAccent),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "Message Templates (Leads Cadence)",
+                        color = TealAccent,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
                 OutlinedButton(
                     onClick = { showMemoryDialog = true },
                     shape = CardShape8,
@@ -1500,23 +1518,76 @@ fun SettingsScreen(
                     }
                 }
 
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SettingsTextField(
+                        value = yearlyGoalField,
+                        onValueChange = { yearlyGoalField = it },
+                        label = "Annual Goal (NGN)",
+                        modifier = Modifier.weight(1f)
+                    )
+                    SettingsTextField(
+                        value = startDateField,
+                        onValueChange = { startDateField = it },
+                        label = "Cycle Start (YYYY-MM-DD)",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
                 SettingsTextField(
-                    value = yearlyGoalField,
-                    onValueChange = { yearlyGoalField = it },
-                    label = "Annual Goal Target (NGN)"
+                    value = monthlyTargetField,
+                    onValueChange = { monthlyTargetField = it },
+                    label = "Monthly Cash Target (NGN)"
                 )
-                OutlinedButton(
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SettingsTextField(
+                        value = websitePriceField,
+                        onValueChange = { websitePriceField = it },
+                        label = "Website Price (NGN)",
+                        modifier = Modifier.weight(1f)
+                    )
+                    SettingsTextField(
+                        value = retainerPriceField,
+                        onValueChange = { retainerPriceField = it },
+                        label = "Retainer Price (NGN)",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Button(
                     onClick = {
-                        val parsed = yearlyGoalField.toLongOrNull()
-                        if (parsed != null && parsed > 0) {
-                            viewModel.updateGoals(goals.copy(yearlyGoal = parsed))
+                        val parsedYear = yearlyGoalField.replace(",", "").trim().toLongOrNull() ?: goals.yearlyGoal
+                        val parsedMonth = monthlyTargetField.replace(",", "").trim().toLongOrNull() ?: goals.monthlyTarget
+                        val parsedWeb = websitePriceField.replace(",", "").trim().toLongOrNull() ?: goals.websitePrice
+                        val parsedRetainer = retainerPriceField.replace(",", "").trim().toLongOrNull() ?: goals.retainerPrice
+                        val cleanStart = startDateField.trim().ifBlank { goals.startDate }
+                        if (parsedYear > 0L) {
+                            viewModel.updateGoals(
+                                goals.copy(
+                                    yearlyGoal = parsedYear,
+                                    startDate = cleanStart,
+                                    monthlyTarget = parsedMonth.coerceAtLeast(1L),
+                                    websitePrice = parsedWeb.coerceAtLeast(1L),
+                                    retainerPrice = parsedRetainer.coerceAtLeast(1L)
+                                )
+                            )
                         }
                     },
                     shape = CardShape8,
-                    border = BorderStroke(1.dp, BorderDark),
+                    colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Update Annual Goal", color = TextPrimaryDark)
+                    Text(
+                        "Save 10M Goal & Service Prices",
+                        color = BgDark,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
 
                 OutlinedButton(

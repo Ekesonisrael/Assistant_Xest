@@ -52,6 +52,31 @@ sealed class ParsedIntent {
         val targetQuery: String
     ) : ParsedIntent()
 
+    data object WhoIsDueToday : ParsedIntent()
+
+    data class AddLeadVoice(
+        val name: String,
+        val service: String,
+        val phone: String,
+        val observation: String,
+        val sourceText: String
+    ) : ParsedIntent()
+
+    data class LeadStageVoice(
+        val leadName: String,
+        val targetStage: String,
+        val quoteAmount: Long?,
+        val sourceText: String
+    ) : ParsedIntent()
+
+    data class LogPaymentVoice(
+        val clientName: String,
+        val amount: Long,
+        val paymentType: String,
+        val note: String,
+        val sourceText: String
+    ) : ParsedIntent()
+
     /**
      * Any conversational message, question, or open voice prompt.
      * Never saved as a Note (Notes require explicit "Note: [text]").
@@ -97,6 +122,14 @@ object AssistantParser {
                 }
             }
         }
+
+        // 1b. Leads & Payments voice/text commands
+        if (MoneyAndLeadParser.isWhoIsDueToday(cleaned)) {
+            return ParsedIntent.WhoIsDueToday
+        }
+        MoneyAndLeadParser.tryParseAddLead(cleaned)?.let { return it }
+        MoneyAndLeadParser.tryParsePaymentCommand(cleaned)?.let { return it }
+        MoneyAndLeadParser.tryParseLeadStageCommand(cleaned)?.let { return it }
 
         // 2. Explicit raw inbox check commands only (specific questions like "do I have any meetings tomorrow?" route to Groq)
         if (
