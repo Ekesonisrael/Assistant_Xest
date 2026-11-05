@@ -129,6 +129,10 @@ fun SettingsScreen(
     val wakeWordStatusText by viewModel.wakeWordStatusText.collectAsState()
     val wakeWordStatusIsError by viewModel.wakeWordStatusIsError.collectAsState()
 
+    val isContinuousAudioRunning by viewModel.isContinuousAudioRunning.collectAsState()
+    val continuousMicLevel by viewModel.continuousAudioMicLevel.collectAsState()
+    val thoughtDraft by viewModel.thoughtDraft.collectAsState()
+
     val lastEmailCheckTime by viewModel.lastEmailCheckTime.collectAsState()
     val lastEmailCheckResult by viewModel.lastEmailCheckResult.collectAsState()
     val lastEmailCheckIsError by viewModel.lastEmailCheckIsError.collectAsState()
@@ -745,6 +749,105 @@ fun SettingsScreen(
                             )
                         }
                     )
+                }
+            }
+        }
+
+        // 0b. Continuous Audio & Thought Buffer Engine
+        item {
+            SettingsCard(title = "CONTINUOUS AUDIO & THOUGHT BUFFER (ZERO-TIMEOUT)") {
+                SettingsSwitchRow(
+                    label = "Continuous 16kHz Stream & Thought Buffer",
+                    checked = isContinuousAudioRunning,
+                    onCheckedChange = { viewModel.toggleContinuousAudio() }
+                )
+
+                Text(
+                    text = "Replaces aggressive 2-second VAD silence cutoff with a rolling memory ring buffer. The assistant stays completely silent while you think, pause, or ramble, executing only when an explicit trigger keyword is voiced.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMutedDark
+                )
+
+                // Live Mic Energy Bar
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = if (isContinuousAudioRunning) "Microphone Stream Active (16kHz Mono 16-bit PCM)" else "Continuous Service Idle",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isContinuousAudioRunning) TealAccent else TextMutedDark
+                        )
+                        Text(
+                            text = "$continuousMicLevel / 100",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TealAccent,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { (continuousMicLevel / 100f).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        color = TealAccent,
+                        trackColor = SurfaceSubtleDark
+                    )
+                }
+
+                // Current Accumulated Thought Buffer Draft
+                Surface(
+                    color = SurfaceSubtleDark,
+                    shape = CardShape8,
+                    border = BorderStroke(1.dp, BorderDark),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "Accumulated Thought Buffer Draft:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TealAccent,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = if (thoughtDraft.isNotBlank()) "\"$thoughtDraft\"" else "(Buffer empty — speak or ramble to accumulate thoughts)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (thoughtDraft.isNotBlank()) TextPrimaryDark else TextMutedDark,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                }
+
+                Text(
+                    text = "Supported Explicit Trigger Keywords:\n• \"Execute\" / \"Process\" -> Dispatches full thought payload\n• \"Save note\" / \"Take note\" -> Saves directly to notes\n• \"Add task\" / \"Create task\" -> Adds to today's plan\n• \"Done thinking\" / \"Over to you\" / \"Go ahead\" -> Dispatches payload",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMutedDark
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { viewModel.forceFinalizeThought() },
+                        enabled = thoughtDraft.isNotBlank(),
+                        shape = CardShape8,
+                        border = BorderStroke(1.dp, if (thoughtDraft.isNotBlank()) TealAccent else BorderDark),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Force Dispatch Buffer", color = if (thoughtDraft.isNotBlank()) TealAccent else TextMutedDark)
+                    }
+                    Button(
+                        onClick = { viewModel.toggleContinuousAudio() },
+                        shape = CardShape8,
+                        colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            if (isContinuousAudioRunning) "Stop Service" else "Start Service",
+                            color = TextPrimaryDark,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
         }

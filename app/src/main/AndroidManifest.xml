@@ -60,6 +60,12 @@
             android:exported="false"
             android:foregroundServiceType="microphone|mediaPlayback" />
 
+        <service
+            android:name=".service.ContinuousAudioService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
         <receiver
             android:name=".service.AlarmReceiver"
             android:enabled="true"

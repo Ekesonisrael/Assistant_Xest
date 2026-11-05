@@ -1,0 +1,11 @@
+{
+  "name": "abuja-studio-goal-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Abuja Studio Goal Tracker Web Companion and APK Distribution Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  }
+}

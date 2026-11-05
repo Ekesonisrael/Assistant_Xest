@@ -42,6 +42,7 @@ import com.xestlab.assistant.service.TtsGreetingHelper
 import com.xestlab.assistant.service.VoiceEngine
 import com.xestlab.assistant.service.WakeWordDiagnostics
 import com.xestlab.assistant.service.WakeWordService
+import com.xestlab.assistant.service.ContinuousAudioService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -164,6 +165,11 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val wakeWordIsRunning: StateFlow<Boolean> = WakeWordService.isRunningFlow
     val wakeWordStatusText: StateFlow<String> = WakeWordService.statusMessageFlow
     val wakeWordStatusIsError: StateFlow<Boolean> = WakeWordService.statusIsErrorFlow
+
+    // Continuous-Flow Audio & Thought Buffer Engine
+    val isContinuousAudioRunning: StateFlow<Boolean> = ContinuousAudioService.isRecordingFlow
+    val continuousAudioMicLevel: StateFlow<Int> = ContinuousAudioService.micLevelFlow
+    val thoughtDraft: StateFlow<String> = ContinuousAudioService.thoughtDraftFlow
 
     // System Health Telemetry Flows (Alarms & Email)
     val lastEmailCheckTime: StateFlow<Long> = EmailHelper.lastCheckTimeFlow
@@ -308,9 +314,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 refreshWeeklySummary()
             }
         }
+        ContinuousAudioService.onThoughtDispatched = { finalized ->
+            viewModelScope.launch {
+                handleUniversalInput(finalized.cleanText, isSpoken = true)
+            }
+            true
+        }
     }
 
     override fun onCleared() {
+        ContinuousAudioService.onThoughtDispatched = null
         voiceEngine.shutdown()
         super.onCleared()
     }
@@ -1570,6 +1583,30 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun testJarvisLoopFromSettings() {
         securePrefs.wakeWordName = "Jarvis"
         WakeWordService.triggerJarvisLoopTest(appContext)
+    }
+
+    // --- Continuous-Flow Audio & Thought Buffer Controls ---
+
+    fun toggleContinuousAudio() {
+        if (ContinuousAudioService.isRecordingFlow.value) {
+            ContinuousAudioService.stop(appContext)
+            _statusBanner.value = "Continuous thought buffer stopped."
+        } else {
+            ContinuousAudioService.start(appContext)
+            _statusBanner.value = "Continuous thought buffer active. Speak freely; say 'Execute' or 'Save note' when finished."
+        }
+    }
+
+    fun startContinuousAudio() {
+        ContinuousAudioService.start(appContext)
+    }
+
+    fun stopContinuousAudio() {
+        ContinuousAudioService.stop(appContext)
+    }
+
+    fun forceFinalizeThought() {
+        ContinuousAudioService.forceFinalize(appContext)
     }
 
     // --- System Health One-Tap Fix Helpers ---

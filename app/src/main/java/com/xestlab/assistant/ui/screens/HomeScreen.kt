@@ -128,6 +128,9 @@ fun HomeScreen(viewModel: AssistantViewModel) {
     val dueFollowUpsToday by viewModel.dueFollowUpsToday.collectAsState()
     val revenueGauge by viewModel.revenueGauge.collectAsState()
     val pendingConfirmation by viewModel.pendingConfirmation.collectAsState()
+    val isContinuousAudioRunning by viewModel.isContinuousAudioRunning.collectAsState()
+    val continuousMicLevel by viewModel.continuousAudioMicLevel.collectAsState()
+    val thoughtDraft by viewModel.thoughtDraft.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
     var isListening by remember { mutableStateOf(false) }
@@ -507,6 +510,76 @@ fun HomeScreen(viewModel: AssistantViewModel) {
                     },
                     onStopSpeech = { viewModel.stopSpeaking() }
                 )
+            }
+
+            // 2a. Thought Buffer Live Stream & Explicit Trigger Card
+            if (isContinuousAudioRunning || thoughtDraft.isNotBlank()) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = CardShape8,
+                        colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                        border = BorderStroke(1.dp, TealAccent)
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .background(TealAccent, CircleShape)
+                                    )
+                                    Text(
+                                        text = "  Thought Buffer (Continuous Flow)",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = TealAccent
+                                    )
+                                }
+                                Text(
+                                    text = if (isContinuousAudioRunning) "Live Mic: $continuousMicLevel%" else "Paused",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextMutedDark
+                                )
+                            }
+                            if (thoughtDraft.isNotBlank()) {
+                                Text(
+                                    text = "\"$thoughtDraft\"",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextPrimaryDark,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+                            } else {
+                                Text(
+                                    text = "Listening continuously without silence cutoffs. Say 'Execute', 'Save note', or 'Done thinking' when finished.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextMutedDark,
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                if (thoughtDraft.isNotBlank()) {
+                                    TextButton(onClick = { viewModel.forceFinalizeThought() }) {
+                                        Text("Dispatch Now", color = TealAccent)
+                                    }
+                                }
+                                TextButton(onClick = { viewModel.toggleContinuousAudio() }) {
+                                    Text(
+                                        if (isContinuousAudioRunning) "Stop Continuous" else "Start Continuous",
+                                        color = TextMutedDark
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // 2b. Voice / Chat Action Confirmation Card (Leads & Payments)
